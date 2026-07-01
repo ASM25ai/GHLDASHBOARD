@@ -1,0 +1,18 @@
+name: Sync GHL Qualified Leads
+
+on:
+  schedule:
+    # Every 30 minutes, all day, every day (UTC). GitHub Actions cron can
+    # run a few minutes late under load — fine for this use case.
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {} # lets you trigger a run manually from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Vercel sync endpoint
+        run: |
+          curl -sS -f \
+            "${{ secrets.VERCEL_SYNC_URL }}?secret=${{ secrets.CRON_SECRET }}" \
+            || (echo "Sync call failed" && exit 1)
