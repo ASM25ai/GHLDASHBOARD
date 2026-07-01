@@ -1,0 +1,9 @@
+{
+  "name": "ghl-leads-sheets-sync",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Polls GHL every 30 minutes for qualified leads this month and syncs a full month dashboard into Google Sheets.",
+  "dependencies": {
+    "googleapis": "^140.0.1"
+  }
+}
