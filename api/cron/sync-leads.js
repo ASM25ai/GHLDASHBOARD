@@ -18,7 +18,16 @@ const {
   normalizeFMForDealer,
   normalizeSalesRep,
 } = require('../../lib/aliases');
+const {
+  fetchTodayStats,
+  fetchMTDStats,
+  fmtHours,
+  fmtActivity,
+} = require('../../lib/hubstaff');
 const SEED_DEALERS = require('../../lib/dealers');
+const REPS         = require('../../lib/reps');
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function parseDate(value) {
   if (!value) return null;
@@ -29,8 +38,8 @@ function parseDate(value) {
 function isSameDay(a, b) {
   return (
     a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
+    a.getMonth()    === b.getMonth()    &&
+    a.getDate()     === b.getDate()
   );
 }
 
@@ -46,6 +55,8 @@ function pct(delivered, target) {
   if (!target) return '-';
   return `${Math.round((delivered / target) * 100)}%`;
 }
+
+// ── Main handler ──────────────────────────────────────────────────────────────
 
 module.exports = async (req, res) => {
   const hasValidSecret = req.query.secret && req.query.secret === process.env.CRON_SECRET;
@@ -100,7 +111,7 @@ module.exports = async (req, res) => {
       leads.push({ contact, qDate, dealer, fm, salesRep, leadType });
     }
 
-    // ── 6. Aggregate stats ────────────────────────────────────────────────
+    // ── 6. Aggregate dealer + FM stats ────────────────────────────────────
     const dealerStats = {};
     for (const dealer of settings.dealers) {
       dealerStats[dealer] = { today: 0, mtd: 0, fms: {} };
@@ -110,55 +121,76 @@ module.exports = async (req, res) => {
       dealerStats[dealer].fms['Unassigned'] = { today: 0, mtd: 0 };
     }
 
-    for (const { qDate, dealer, fm } of leads) {
-      if (!settings.dealers.includes(dealer)) continue;
+    // Aggregate sales rep lead stats separately for the Sales Rep tab
+    const repLeadStats = {}; // ghlName → { today, mtd }
+    for (const ghlName of Object.keys(REPS)) {
+      repLeadStats[ghlName] = { today: 0, mtd: 0 };
+    }
+
+    for (const { qDate, dealer, fm, salesRep } of leads) {
       const isToday = isSameDay(qDate, now);
-      dealerStats[dealer].mtd++;
-      if (isToday) dealerStats[dealer].today++;
-      if (!dealerStats[dealer].fms[fm]) dealerStats[dealer].fms[fm] = { today: 0, mtd: 0 };
-      dealerStats[dealer].fms[fm].mtd++;
-      if (isToday) dealerStats[dealer].fms[fm].today++;
+
+      // Dealer stats
+      if (settings.dealers.includes(dealer)) {
+        dealerStats[dealer].mtd++;
+        if (isToday) dealerStats[dealer].today++;
+        if (!dealerStats[dealer].fms[fm]) dealerStats[dealer].fms[fm] = { today: 0, mtd: 0 };
+        dealerStats[dealer].fms[fm].mtd++;
+        if (isToday) dealerStats[dealer].fms[fm].today++;
+      }
+
+      // Sales rep lead stats
+      if (repLeadStats[salesRep]) {
+        repLeadStats[salesRep].mtd++;
+        if (isToday) repLeadStats[salesRep].today++;
+      }
     }
 
     const syncedAt = now.toISOString();
 
-    // ── 7. Ensure tabs exist ──────────────────────────────────────────────
+    // ── 7. Fetch Hubstaff stats (non-blocking — graceful fallback if it fails)
+    let hubToday = {};
+    let hubMTD   = {};
+    let hubError = null;
+
+    try {
+      [hubToday, hubMTD] = await Promise.all([
+        fetchTodayStats(now),
+        fetchMTDStats(monthStart, now),
+      ]);
+    } catch (err) {
+      hubError = err.message;
+      console.warn('Hubstaff fetch failed (GHL sync will still complete):', err.message);
+    }
+
+    // ── 8. Ensure tabs exist ──────────────────────────────────────────────
     const monthTabName = `Qualified Leads - ${monthLabel(now)}`;
     await ensureTab(sheets, spreadsheetId, monthTabName);
     await ensureTab(sheets, spreadsheetId, 'Current Month Data');
     await ensureTab(sheets, spreadsheetId, 'MTD Summary');
+    await ensureTab(sheets, spreadsheetId, 'Sales Rep');
     await ensureTab(sheets, spreadsheetId, 'Daily Breakdown');
     await ensureTab(sheets, spreadsheetId, 'Lead Type Breakdown');
 
-    // ── 8. Raw data (monthly archive + permanent "Current Month Data" tab) ─
+    // ── 9. Raw data tabs ──────────────────────────────────────────────────
     const rawHeaders = [
       'Contact ID', 'Qualified Date', 'Dealer', 'FM',
       'Sales Rep', 'Lead Type', 'Contact Name', 'Phone', 'Email', 'Last Synced',
     ];
     const rawDataRows = leads.map(({ contact, qDate, dealer, fm, salesRep, leadType }) => [
-      contact.id,
-      dateKey(qDate),
-      dealer, fm, salesRep, leadType,
+      contact.id, dateKey(qDate), dealer, fm, salesRep, leadType,
       `${contact.firstName || ''} ${contact.lastName || ''}`.trim(),
-      contact.phone || '',
-      contact.email || '',
-      syncedAt,
+      contact.phone || '', contact.email || '', syncedAt,
     ]);
 
     await clearAndWrite(sheets, spreadsheetId, monthTabName,         [rawHeaders, ...rawDataRows]);
     await clearAndWrite(sheets, spreadsheetId, 'Current Month Data', [rawHeaders, ...rawDataRows]);
 
-    // ── 9. MTD Summary — dealer rows + collapsible FM sub-rows ───────────
-    //
-    // We track row indices as we build the rows so we know exactly which
-    // rows are FM sub-rows (to pass to applyMTDRowGroups for the +/- toggle).
-    //
-    // Row index 0 = header, so we start at 1.
+    // ── 10. MTD Summary (dealer rows + collapsible FM sub-rows) ───────────
+    let rowIdx = 1;
+    const fmGroups  = [];
+    let totalOrder  = 0, totalToday = 0, totalMtd = 0;
 
-    let rowIdx     = 1; // current 0-based row index (header is 0)
-    const fmGroups = []; // [{ startIndex, endIndex }] for applyMTDRowGroups
-
-    let totalOrder = 0, totalToday = 0, totalMtd = 0;
     const summaryRows = [
       ['Dealer / FM', 'Order / Target', "Today's Qualified", 'MTD Delivered', 'Remaining', '% Complete', 'Last Synced'],
     ];
@@ -166,55 +198,115 @@ module.exports = async (req, res) => {
     for (const dealer of settings.dealers) {
       const order = settings.orders[dealer] || 0;
       const stats = dealerStats[dealer] || { today: 0, mtd: 0, fms: {} };
-      totalOrder += order;
-      totalToday += stats.today;
-      totalMtd   += stats.mtd;
+      totalOrder += order; totalToday += stats.today; totalMtd += stats.mtd;
 
-      // Dealer row
-      summaryRows.push([
-        dealer, order, stats.today, stats.mtd,
-        Math.max(0, order - stats.mtd), pct(stats.mtd, order), syncedAt,
-      ]);
+      summaryRows.push([dealer, order, stats.today, stats.mtd, Math.max(0, order - stats.mtd), pct(stats.mtd, order), syncedAt]);
       rowIdx++;
 
-      // Track where FM sub-rows start for this dealer
       const fmStartIdx = rowIdx;
 
-      // FM sub-rows
       for (const fmDef of (settings.fms[dealer] || [])) {
         const s = stats.fms[fmDef.name] || { today: 0, mtd: 0 };
-        summaryRows.push([
-          `  → ${fmDef.name}`, fmDef.target, s.today, s.mtd,
-          Math.max(0, fmDef.target - s.mtd), pct(s.mtd, fmDef.target), '',
-        ]);
+        summaryRows.push([`  → ${fmDef.name}`, fmDef.target, s.today, s.mtd, Math.max(0, fmDef.target - s.mtd), pct(s.mtd, fmDef.target), '']);
         rowIdx++;
       }
 
-      // Unassigned sub-row (only if leads landed here)
       const unassigned = stats.fms['Unassigned'] || { today: 0, mtd: 0 };
       if (unassigned.mtd > 0) {
         summaryRows.push([`  → Unassigned`, '-', unassigned.today, unassigned.mtd, '-', '-', '']);
         rowIdx++;
       }
 
-      // If any FM sub-rows were added, register them as a collapsible group
-      if (rowIdx > fmStartIdx) {
-        fmGroups.push({ startIndex: fmStartIdx, endIndex: rowIdx });
-      }
+      if (rowIdx > fmStartIdx) fmGroups.push({ startIndex: fmStartIdx, endIndex: rowIdx });
     }
 
-    // TOTAL row
-    summaryRows.push([
-      'TOTAL', totalOrder, totalToday, totalMtd,
-      Math.max(0, totalOrder - totalMtd), pct(totalMtd, totalOrder), syncedAt,
-    ]);
+    summaryRows.push(['TOTAL', totalOrder, totalToday, totalMtd, Math.max(0, totalOrder - totalMtd), pct(totalMtd, totalOrder), syncedAt]);
 
     await clearAndWrite(sheets, spreadsheetId, 'MTD Summary', summaryRows);
-
-    // Apply row grouping + collapse FM sub-rows (the +/- toggle on the left)
     await applyMTDRowGroups(sheets, spreadsheetId, fmGroups);
 
-    // ── 10. Daily Breakdown ───────────────────────────────────────────────
+    // ── 11. Sales Rep tab (leads + Hubstaff hours, two sections) ─────────
+    const repNames = Object.keys(REPS);
+
+    // --- TODAY section ---
+    const salesTodayRows = [
+      [`TODAY — ${dateKey(now)}`],
+      ['Sales Rep', 'Leads Today', 'Hours Today', 'Activity %'],
+    ];
+
+    let totLeadsToday = 0, totTrackedToday = 0, totActiveToday = 0;
+
+    for (const ghlName of repNames) {
+      const rep     = REPS[ghlName];
+      const leads_  = repLeadStats[ghlName] || { today: 0 };
+      const hub     = hubToday[String(rep.hubstaffId)] || { tracked: 0, active: 0 };
+
+      totLeadsToday   += leads_.today;
+      totTrackedToday += hub.tracked;
+      totActiveToday  += hub.active;
+
+      salesTodayRows.push([
+        `${ghlName} (${rep.displayName})`,
+        leads_.today,
+        fmtHours(hub.tracked),
+        fmtActivity(hub.active, hub.tracked),
+      ]);
+    }
+
+    salesTodayRows.push([
+      'TOTAL',
+      totLeadsToday,
+      fmtHours(totTrackedToday),
+      fmtActivity(totActiveToday, totTrackedToday),
+    ]);
+
+    // --- MTD section (2 blank rows gap) ---
+    const salesMTDRows = [
+      [],
+      [],
+      [`MTD — ${monthLabel(now)}`],
+      ['Sales Rep', 'MTD Leads', 'MTD Hours', 'Avg Activity %'],
+    ];
+
+    let totLeadsMTD = 0, totTrackedMTD = 0, totActiveMTD = 0;
+
+    for (const ghlName of repNames) {
+      const rep    = REPS[ghlName];
+      const leads_ = repLeadStats[ghlName] || { mtd: 0 };
+      const hub    = hubMTD[String(rep.hubstaffId)] || { tracked: 0, active: 0 };
+
+      totLeadsMTD   += leads_.mtd;
+      totTrackedMTD += hub.tracked;
+      totActiveMTD  += hub.active;
+
+      salesMTDRows.push([
+        `${ghlName} (${rep.displayName})`,
+        leads_.mtd,
+        fmtHours(hub.tracked),
+        fmtActivity(hub.active, hub.tracked),
+      ]);
+    }
+
+    salesMTDRows.push([
+      'TOTAL',
+      totLeadsMTD,
+      fmtHours(totTrackedMTD),
+      fmtActivity(totActiveMTD, totTrackedMTD),
+    ]);
+
+    if (hubError) {
+      salesMTDRows.push([]);
+      salesMTDRows.push([`⚠ Hubstaff fetch failed: ${hubError}. Hours show 0 until resolved.`]);
+    }
+
+    await clearAndWrite(sheets, spreadsheetId, 'Sales Rep', [
+      ...salesTodayRows,
+      ...salesMTDRows,
+      [],
+      [`Last synced: ${syncedAt}`],
+    ]);
+
+    // ── 12. Daily Breakdown ───────────────────────────────────────────────
     const byDateRep         = {};
     const dealerDailyTotals = {};
     for (const d of settings.dealers) dealerDailyTotals[d] = 0;
@@ -233,9 +325,7 @@ module.exports = async (req, res) => {
     const dailyDataRows = Object.values(byDateRep)
       .sort((a, b) => a.date === b.date ? a.rep.localeCompare(b.rep) : a.date.localeCompare(b.date))
       .map((row) => {
-        const counts = settings.dealers.map((d) => {
-          const v = row[d] || 0; dealerDailyTotals[d] += v; return v;
-        });
+        const counts = settings.dealers.map((d) => { const v = row[d] || 0; dealerDailyTotals[d] += v; return v; });
         grandDailyTotal += row.total;
         return [row.date, row.rep, ...counts, row.total];
       });
@@ -246,7 +336,7 @@ module.exports = async (req, res) => {
       ['', 'TOTAL', ...settings.dealers.map((d) => dealerDailyTotals[d]), grandDailyTotal],
     ]);
 
-    // ── 11. Lead Type Breakdown ───────────────────────────────────────────
+    // ── 13. Lead Type Breakdown ───────────────────────────────────────────
     const typeByDealer = {};
     const allTypes     = new Set();
 
@@ -273,7 +363,7 @@ module.exports = async (req, res) => {
       ['TOTAL', ...ltColumnTotals, ltColumnTotals.reduce((a, b) => a + b, 0)],
     ]);
 
-    // ── 12. Dealer View tab (created once) ────────────────────────────────
+    // ── 14. Dealer View tab (created once) ────────────────────────────────
     await initDealerViewTab(sheets, spreadsheetId);
 
     // ── Done ──────────────────────────────────────────────────────────────
@@ -282,9 +372,10 @@ module.exports = async (req, res) => {
       monthTab:                monthTabName,
       qualifiedLeadsThisMonth: leads.length,
       summaryTotals:           { totalToday, totalMtd, totalOrder },
+      hubstaffStatus:          hubError ? `failed: ${hubError}` : 'ok',
       unmappedDealerValues:    Array.from(unmappedDealers),
       note: unmappedDealers.size
-        ? 'Some GHL dealer values were not matched. Add them to the Aliases column in the Settings tab.'
+        ? 'Some GHL dealer values were not matched. Add them to Aliases in the Settings tab.'
         : 'All dealer values matched successfully.',
       syncedAt,
     });
