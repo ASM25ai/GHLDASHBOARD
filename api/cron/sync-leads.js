@@ -19,8 +19,7 @@ const {
   normalizeSalesRep,
 } = require('../../lib/aliases');
 const {
-  fetchTodayStats,
-  fetchMTDStats,
+  fetchHubstaffStats,
   fmtHours,
   fmtActivity,
 } = require('../../lib/hubstaff');
@@ -149,15 +148,16 @@ module.exports = async (req, res) => {
     const syncedAt = now.toISOString();
 
     // ── 7. Fetch Hubstaff stats (non-blocking — graceful fallback if it fails)
+    // The personal access token is a refresh token — fetchHubstaffStats
+    // exchanges it for a short-lived access token before making API calls.
     let hubToday = {};
     let hubMTD   = {};
     let hubError = null;
 
     try {
-      [hubToday, hubMTD] = await Promise.all([
-        fetchTodayStats(now),
-        fetchMTDStats(monthStart, now),
-      ]);
+      const hubStats = await fetchHubstaffStats(now, monthStart);
+      hubToday = hubStats.todayStats;
+      hubMTD   = hubStats.mtdStats;
     } catch (err) {
       hubError = err.message;
       console.warn('Hubstaff fetch failed (GHL sync will still complete):', err.message);
