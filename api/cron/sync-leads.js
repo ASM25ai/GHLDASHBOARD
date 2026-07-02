@@ -128,10 +128,12 @@ module.exports = async (req, res) => {
     await ensureTab(sheets, spreadsheetId, 'MTD Summary');
     await ensureTab(sheets, spreadsheetId, 'Daily Breakdown');
     await ensureTab(sheets, spreadsheetId, 'Lead Type Breakdown');
-    await ensureTab(sheets, spreadsheetId, 'Dealer Daily');
 
-    // ── 8. Raw data rows (reused for both raw tabs) ───────────────────────
-    const rawHeaders = ['Contact ID', 'Qualified Date', 'Dealer', 'FM', 'Sales Rep', 'Lead Type', 'Contact Name', 'Phone', 'Email', 'Last Synced'];
+    // ── 8. Raw data (written to both monthly archive + permanent tab) ─────
+    const rawHeaders = [
+      'Contact ID', 'Qualified Date', 'Dealer', 'FM',
+      'Sales Rep', 'Lead Type', 'Contact Name', 'Phone', 'Email', 'Last Synced',
+    ];
     const rawDataRows = leads.map(({ contact, qDate, dealer, fm, salesRep, leadType }) => [
       contact.id,
       dateKey(qDate),
@@ -145,9 +147,9 @@ module.exports = async (req, res) => {
       syncedAt,
     ]);
 
-    // Tab: monthly archive (named, preserved across months)
+    // Monthly archive tab — name changes each month, prior months preserved
     await clearAndWrite(sheets, spreadsheetId, monthTabName, [rawHeaders, ...rawDataRows]);
-    // Tab: permanent name (formula source for Dealer View dropdown tab)
+    // Permanent tab — fixed name so Dealer View QUERY formulas always work
     await clearAndWrite(sheets, spreadsheetId, 'Current Month Data', [rawHeaders, ...rawDataRows]);
 
     // ── 9. MTD Summary (dealer rows + FM sub-rows) ────────────────────────
@@ -157,17 +159,23 @@ module.exports = async (req, res) => {
     ];
 
     for (const dealer of settings.dealers) {
-      const order  = settings.orders[dealer] || 0;
-      const stats  = dealerStats[dealer] || { today: 0, mtd: 0, fms: {} };
-      totalOrder  += order;
-      totalToday  += stats.today;
-      totalMtd    += stats.mtd;
+      const order = settings.orders[dealer] || 0;
+      const stats = dealerStats[dealer] || { today: 0, mtd: 0, fms: {} };
+      totalOrder += order;
+      totalToday += stats.today;
+      totalMtd   += stats.mtd;
 
-      summaryRows.push([dealer, order, stats.today, stats.mtd, Math.max(0, order - stats.mtd), pct(stats.mtd, order), syncedAt]);
+      summaryRows.push([
+        dealer, order, stats.today, stats.mtd,
+        Math.max(0, order - stats.mtd), pct(stats.mtd, order), syncedAt,
+      ]);
 
       for (const fmDef of (settings.fms[dealer] || [])) {
         const s = stats.fms[fmDef.name] || { today: 0, mtd: 0 };
-        summaryRows.push([`  → ${fmDef.name}`, fmDef.target, s.today, s.mtd, Math.max(0, fmDef.target - s.mtd), pct(s.mtd, fmDef.target), '']);
+        summaryRows.push([
+          `  → ${fmDef.name}`, fmDef.target, s.today, s.mtd,
+          Math.max(0, fmDef.target - s.mtd), pct(s.mtd, fmDef.target), '',
+        ]);
       }
 
       const unassigned = stats.fms['Unassigned'] || { today: 0, mtd: 0 };
@@ -176,7 +184,10 @@ module.exports = async (req, res) => {
       }
     }
 
-    summaryRows.push(['TOTAL', totalOrder, totalToday, totalMtd, Math.max(0, totalOrder - totalMtd), pct(totalMtd, totalOrder), syncedAt]);
+    summaryRows.push([
+      'TOTAL', totalOrder, totalToday, totalMtd,
+      Math.max(0, totalOrder - totalMtd), pct(totalMtd, totalOrder), syncedAt,
+    ]);
     await clearAndWrite(sheets, spreadsheetId, 'MTD Summary', summaryRows);
 
     // ── 10. Daily Breakdown (date × sales rep × dealer) ───────────────────
@@ -198,7 +209,11 @@ module.exports = async (req, res) => {
     const dailyDataRows = Object.values(byDateRep)
       .sort((a, b) => a.date === b.date ? a.rep.localeCompare(b.rep) : a.date.localeCompare(b.date))
       .map((row) => {
-        const counts = settings.dealers.map((d) => { const v = row[d] || 0; dealerDailyTotals[d] += v; return v; });
+        const counts = settings.dealers.map((d) => {
+          const v = row[d] || 0;
+          dealerDailyTotals[d] += v;
+          return v;
+        });
         grandDailyTotal += row.total;
         return [row.date, row.rep, ...counts, row.total];
       });
@@ -222,95 +237,21 @@ module.exports = async (req, res) => {
     }
 
     const sortedTypes    = Array.from(allTypes).sort();
-    const ltColumnTotals = sortedTypes.map((t) => settings.dealers.reduce((sum, d) => sum + ((typeByDealer[d] || {})[t] || 0), 0));
+    const ltColumnTotals = sortedTypes.map((t) =>
+      settings.dealers.reduce((sum, d) => sum + ((typeByDealer[d] || {})[t] || 0), 0)
+    );
 
     await clearAndWrite(sheets, spreadsheetId, 'Lead Type Breakdown', [
       ['Dealer', ...sortedTypes, 'Total'],
       ...settings.dealers.map((d) => {
-        const row = typeByDealer[d] || {};
+        const row    = typeByDealer[d] || {};
         const counts = sortedTypes.map((t) => row[t] || 0);
         return [d, ...counts, counts.reduce((a, b) => a + b, 0)];
       }),
       ['TOTAL', ...ltColumnTotals, ltColumnTotals.reduce((a, b) => a + b, 0)],
     ]);
 
-    // ── 12. Dealer Daily (Option B — per-dealer blocks) ───────────────────
-    // One self-contained block per dealer: header → FM summary → daily table → separator
-    const dealerDailyRows = [];
-
-    // Group leads by dealer
-    const leadsByDealer = {};
-    for (const d of settings.dealers) leadsByDealer[d] = [];
-    for (const lead of leads) {
-      if (settings.dealers.includes(lead.dealer)) leadsByDealer[lead.dealer].push(lead);
-    }
-
-    for (const dealer of settings.dealers) {
-      const dealerLeads = leadsByDealer[dealer] || [];
-      const order       = settings.orders[dealer] || 0;
-      const stats       = dealerStats[dealer] || { today: 0, mtd: 0, fms: {} };
-      const fmList      = settings.fms[dealer] || [];
-      const fmNames     = fmList.map((f) => f.name);
-      const unassigned  = stats.fms['Unassigned'] || { today: 0, mtd: 0 };
-      const showUnassigned = unassigned.mtd > 0;
-      const allFmCols   = [...fmNames, ...(showUnassigned ? ['Unassigned'] : [])];
-
-      // Dealer header
-      dealerDailyRows.push([
-        `═══ ${dealer.toUpperCase()} ═══`, '',
-        'Order:', order, 'Today:', stats.today,
-        'MTD:', stats.mtd, 'Remaining:', Math.max(0, order - stats.mtd),
-        '%:', pct(stats.mtd, order),
-      ]);
-      dealerDailyRows.push([]);
-
-      // FM summary section
-      if (fmList.length > 0) {
-        dealerDailyRows.push(['FM Name', 'Target', 'MTD Delivered', 'Remaining', '% Complete']);
-        for (const fm of fmList) {
-          const s = stats.fms[fm.name] || { today: 0, mtd: 0 };
-          dealerDailyRows.push([fm.name, fm.target, s.mtd, Math.max(0, fm.target - s.mtd), pct(s.mtd, fm.target)]);
-        }
-        if (showUnassigned) {
-          dealerDailyRows.push(['Unassigned', '-', unassigned.mtd, '-', '-']);
-        }
-        dealerDailyRows.push([]);
-      }
-
-      // Daily table: group this dealer's leads by date + salesRep, count by FM
-      const byDR = {};
-      for (const { qDate, salesRep, fm } of dealerLeads) {
-        const dk  = dateKey(qDate);
-        const rep = salesRep || '(unassigned)';
-        const key = `${dk}|${rep}`;
-        if (!byDR[key]) byDR[key] = { date: dk, rep, fms: {}, total: 0 };
-        byDR[key].fms[fm] = (byDR[key].fms[fm] || 0) + 1;
-        byDR[key].total++;
-      }
-
-      const fmColTotals   = {};
-      for (const fn of allFmCols) fmColTotals[fn] = 0;
-      let dealerGrandTotal = 0;
-
-      dealerDailyRows.push(['Date', 'Sales Rep', ...allFmCols, 'Total']);
-
-      Object.values(byDR)
-        .sort((a, b) => a.date === b.date ? a.rep.localeCompare(b.rep) : a.date.localeCompare(b.date))
-        .forEach((row) => {
-          const fmCounts = allFmCols.map((fn) => { const v = row.fms[fn] || 0; fmColTotals[fn] += v; return v; });
-          dealerGrandTotal += row.total;
-          dealerDailyRows.push([row.date, row.rep, ...fmCounts, row.total]);
-        });
-
-      dealerDailyRows.push(['', 'TOTAL', ...allFmCols.map((fn) => fmColTotals[fn]), dealerGrandTotal]);
-
-      // 3 blank rows between dealer blocks
-      dealerDailyRows.push([], [], []);
-    }
-
-    await clearAndWrite(sheets, spreadsheetId, 'Dealer Daily', dealerDailyRows);
-
-    // ── 13. Dealer View tab (Option A — dropdown + formulas, created once) ─
+    // ── 12. Dealer View tab (dropdown + formulas, created once) ───────────
     await initDealerViewTab(sheets, spreadsheetId);
 
     // ── Done ──────────────────────────────────────────────────────────────
