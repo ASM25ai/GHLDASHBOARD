@@ -23,6 +23,7 @@ const {
   fmtHours,
   fmtActivity,
 } = require('../../lib/hubstaff');
+const { fetchCallStats } = require('../../lib/calls');
 const SEED_DEALERS = require('../../lib/dealers');
 const REPS         = require('../../lib/reps');
 
@@ -154,13 +155,26 @@ module.exports = async (req, res) => {
     let hubMTD   = {};
     let hubError = null;
 
+    let hubRawSample = null;
     try {
       const hubStats = await fetchHubstaffStats(now, monthStart);
-      hubToday = hubStats.todayStats;
-      hubMTD   = hubStats.mtdStats;
+      hubToday     = hubStats.todayStats;
+      hubMTD       = hubStats.mtdStats;
+      hubRawSample = hubStats.rawSample; // for debugging activity % field
     } catch (err) {
       hubError = err.message;
       console.warn('Hubstaff fetch failed (GHL sync will still complete):', err.message);
+    }
+
+    // ── 7b. Fetch GHL call counts per rep (non-blocking) ─────────────────
+    let callStats = {};
+    let callError = null;
+
+    try {
+      callStats = await fetchCallStats(REPS, locationId, now, monthStart);
+    } catch (err) {
+      callError = err.message;
+      console.warn('GHL call count fetch failed:', err.message);
     }
 
     // ── 8. Ensure tabs exist ──────────────────────────────────────────────
@@ -231,33 +245,52 @@ module.exports = async (req, res) => {
     // --- TODAY section ---
     const salesTodayRows = [
       [`TODAY — ${dateKey(now)}`],
-      ['Sales Rep', 'Leads Today', 'Hours Today', 'Activity %'],
+      ['Sales Rep', 'Leads Today', 'Calls Today', 'Calls >30s', 'Avg Call Duration', 'Hours Today', 'Activity %'],
     ];
 
-    let totLeadsToday = 0, totTrackedToday = 0, totActiveToday = 0;
+    let totLeadsToday = 0, totCallsToday = 0, totTrackedToday = 0, totActiveToday = 0;
 
     for (const ghlName of repNames) {
-      const rep     = REPS[ghlName];
-      const leads_  = repLeadStats[ghlName] || { today: 0 };
-      const hub     = hubToday[String(rep.hubstaffId)] || { tracked: 0, active: 0 };
+      const rep    = REPS[ghlName];
+      const leads_ = repLeadStats[ghlName] || { today: 0 };
+      const hub    = hubToday[String(rep.hubstaffId)] || { tracked: 0, active: 0 };
+      const calls  = callStats[ghlName] || { callsToday: '-', callsMTD: '-' };
 
       totLeadsToday   += leads_.today;
+      if (typeof calls.callsToday === 'number') totCallsToday += calls.callsToday;
       totTrackedToday += hub.tracked;
       totActiveToday  += hub.active;
+
+      // Use the smarter activity calculation across all Hubstaff fields
+      const actPct = hub.tracked
+        ? (() => {
+            for (const v of [hub.keyboard, hub.active, hub.input_tracked]) {
+              if (v > 0 && v < hub.tracked) return `${Math.round((v / hub.tracked) * 100)}%`;
+            }
+            const combined = (hub.keyboard || 0) + (hub.mouse || 0);
+            if (combined > 0 && combined < hub.tracked) return `${Math.round((combined / hub.tracked) * 100)}%`;
+            return '-';
+          })()
+        : '-';
 
       salesTodayRows.push([
         `${ghlName} (${rep.displayName})`,
         leads_.today,
+        calls.callsToday,
+        calls.calls30sToday,
+        calls.avgDurToday,
         fmtHours(hub.tracked),
-        fmtActivity(hub.active, hub.tracked),
+        actPct,
       ]);
     }
 
     salesTodayRows.push([
       'TOTAL',
       totLeadsToday,
+      totCallsToday,
+      '', '', // calls30s and avgDur totals not meaningful to sum
       fmtHours(totTrackedToday),
-      fmtActivity(totActiveToday, totTrackedToday),
+      '-',
     ]);
 
     // --- MTD section (2 blank rows gap) ---
@@ -265,38 +298,60 @@ module.exports = async (req, res) => {
       [],
       [],
       [`MTD — ${monthLabel(now)}`],
-      ['Sales Rep', 'MTD Leads', 'MTD Hours', 'Avg Activity %'],
+      ['Sales Rep', 'MTD Leads', 'MTD Calls', 'MTD Calls >30s', 'Avg Call Duration', 'MTD Hours', 'Avg Activity %'],
     ];
 
-    let totLeadsMTD = 0, totTrackedMTD = 0, totActiveMTD = 0;
+    let totLeadsMTD = 0, totCallsMTD = 0, totTrackedMTD = 0, totActiveMTD = 0;
 
     for (const ghlName of repNames) {
       const rep    = REPS[ghlName];
       const leads_ = repLeadStats[ghlName] || { mtd: 0 };
       const hub    = hubMTD[String(rep.hubstaffId)] || { tracked: 0, active: 0 };
+      const calls  = callStats[ghlName] || { callsToday: '-', callsMTD: '-' };
 
       totLeadsMTD   += leads_.mtd;
+      if (typeof calls.callsMTD === 'number') totCallsMTD += calls.callsMTD;
       totTrackedMTD += hub.tracked;
       totActiveMTD  += hub.active;
+
+      const actPctMTD = hub.tracked
+        ? (() => {
+            for (const v of [hub.keyboard, hub.active, hub.input_tracked]) {
+              if (v > 0 && v < hub.tracked) return `${Math.round((v / hub.tracked) * 100)}%`;
+            }
+            const combined = (hub.keyboard || 0) + (hub.mouse || 0);
+            if (combined > 0 && combined < hub.tracked) return `${Math.round((combined / hub.tracked) * 100)}%`;
+            return '-';
+          })()
+        : '-';
 
       salesMTDRows.push([
         `${ghlName} (${rep.displayName})`,
         leads_.mtd,
+        calls.callsMTD,
+        calls.calls30sMTD,
+        calls.avgDurMTD,
         fmtHours(hub.tracked),
-        fmtActivity(hub.active, hub.tracked),
+        actPctMTD,
       ]);
     }
 
     salesMTDRows.push([
       'TOTAL',
       totLeadsMTD,
+      totCallsMTD,
+      '', '',
       fmtHours(totTrackedMTD),
-      fmtActivity(totActiveMTD, totTrackedMTD),
+      '-',
     ]);
 
     if (hubError) {
       salesMTDRows.push([]);
       salesMTDRows.push([`⚠ Hubstaff fetch failed: ${hubError}. Hours show 0 until resolved.`]);
+    }
+    if (callError) {
+      salesMTDRows.push([]);
+      salesMTDRows.push([`⚠ GHL call count failed: ${callError}. Calls show - until resolved.`]);
     }
 
     await clearAndWrite(sheets, spreadsheetId, 'Sales Rep', [
@@ -373,6 +428,8 @@ module.exports = async (req, res) => {
       qualifiedLeadsThisMonth: leads.length,
       summaryTotals:           { totalToday, totalMtd, totalOrder },
       hubstaffStatus:          hubError ? `failed: ${hubError}` : 'ok',
+      callCountStatus:         callError ? `failed: ${callError}` : 'ok',
+      hubstaffRawSample:       hubRawSample, // shows raw field names/values — use to debug activity %
       unmappedDealerValues:    Array.from(unmappedDealers),
       note: unmappedDealers.size
         ? 'Some GHL dealer values were not matched. Add them to Aliases in the Settings tab.'
