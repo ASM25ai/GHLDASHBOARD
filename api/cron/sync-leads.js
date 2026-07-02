@@ -11,6 +11,7 @@ const {
   readSettings,
   initSettingsTab,
   initDealerViewTab,
+  applyMTDRowGroups,
 } = require('../../lib/sheets');
 const {
   normalizeDealer,
@@ -129,7 +130,7 @@ module.exports = async (req, res) => {
     await ensureTab(sheets, spreadsheetId, 'Daily Breakdown');
     await ensureTab(sheets, spreadsheetId, 'Lead Type Breakdown');
 
-    // ── 8. Raw data (written to both monthly archive + permanent tab) ─────
+    // ── 8. Raw data (monthly archive + permanent "Current Month Data" tab) ─
     const rawHeaders = [
       'Contact ID', 'Qualified Date', 'Dealer', 'FM',
       'Sales Rep', 'Lead Type', 'Contact Name', 'Phone', 'Email', 'Last Synced',
@@ -137,22 +138,26 @@ module.exports = async (req, res) => {
     const rawDataRows = leads.map(({ contact, qDate, dealer, fm, salesRep, leadType }) => [
       contact.id,
       dateKey(qDate),
-      dealer,
-      fm,
-      salesRep,
-      leadType,
+      dealer, fm, salesRep, leadType,
       `${contact.firstName || ''} ${contact.lastName || ''}`.trim(),
       contact.phone || '',
       contact.email || '',
       syncedAt,
     ]);
 
-    // Monthly archive tab — name changes each month, prior months preserved
-    await clearAndWrite(sheets, spreadsheetId, monthTabName, [rawHeaders, ...rawDataRows]);
-    // Permanent tab — fixed name so Dealer View QUERY formulas always work
+    await clearAndWrite(sheets, spreadsheetId, monthTabName,         [rawHeaders, ...rawDataRows]);
     await clearAndWrite(sheets, spreadsheetId, 'Current Month Data', [rawHeaders, ...rawDataRows]);
 
-    // ── 9. MTD Summary (dealer rows + FM sub-rows) ────────────────────────
+    // ── 9. MTD Summary — dealer rows + collapsible FM sub-rows ───────────
+    //
+    // We track row indices as we build the rows so we know exactly which
+    // rows are FM sub-rows (to pass to applyMTDRowGroups for the +/- toggle).
+    //
+    // Row index 0 = header, so we start at 1.
+
+    let rowIdx     = 1; // current 0-based row index (header is 0)
+    const fmGroups = []; // [{ startIndex, endIndex }] for applyMTDRowGroups
+
     let totalOrder = 0, totalToday = 0, totalMtd = 0;
     const summaryRows = [
       ['Dealer / FM', 'Order / Target', "Today's Qualified", 'MTD Delivered', 'Remaining', '% Complete', 'Last Synced'],
@@ -165,32 +170,51 @@ module.exports = async (req, res) => {
       totalToday += stats.today;
       totalMtd   += stats.mtd;
 
+      // Dealer row
       summaryRows.push([
         dealer, order, stats.today, stats.mtd,
         Math.max(0, order - stats.mtd), pct(stats.mtd, order), syncedAt,
       ]);
+      rowIdx++;
 
+      // Track where FM sub-rows start for this dealer
+      const fmStartIdx = rowIdx;
+
+      // FM sub-rows
       for (const fmDef of (settings.fms[dealer] || [])) {
         const s = stats.fms[fmDef.name] || { today: 0, mtd: 0 };
         summaryRows.push([
           `  → ${fmDef.name}`, fmDef.target, s.today, s.mtd,
           Math.max(0, fmDef.target - s.mtd), pct(s.mtd, fmDef.target), '',
         ]);
+        rowIdx++;
       }
 
+      // Unassigned sub-row (only if leads landed here)
       const unassigned = stats.fms['Unassigned'] || { today: 0, mtd: 0 };
       if (unassigned.mtd > 0) {
         summaryRows.push([`  → Unassigned`, '-', unassigned.today, unassigned.mtd, '-', '-', '']);
+        rowIdx++;
+      }
+
+      // If any FM sub-rows were added, register them as a collapsible group
+      if (rowIdx > fmStartIdx) {
+        fmGroups.push({ startIndex: fmStartIdx, endIndex: rowIdx });
       }
     }
 
+    // TOTAL row
     summaryRows.push([
       'TOTAL', totalOrder, totalToday, totalMtd,
       Math.max(0, totalOrder - totalMtd), pct(totalMtd, totalOrder), syncedAt,
     ]);
+
     await clearAndWrite(sheets, spreadsheetId, 'MTD Summary', summaryRows);
 
-    // ── 10. Daily Breakdown (date × sales rep × dealer) ───────────────────
+    // Apply row grouping + collapse FM sub-rows (the +/- toggle on the left)
+    await applyMTDRowGroups(sheets, spreadsheetId, fmGroups);
+
+    // ── 10. Daily Breakdown ───────────────────────────────────────────────
     const byDateRep         = {};
     const dealerDailyTotals = {};
     for (const d of settings.dealers) dealerDailyTotals[d] = 0;
@@ -210,9 +234,7 @@ module.exports = async (req, res) => {
       .sort((a, b) => a.date === b.date ? a.rep.localeCompare(b.rep) : a.date.localeCompare(b.date))
       .map((row) => {
         const counts = settings.dealers.map((d) => {
-          const v = row[d] || 0;
-          dealerDailyTotals[d] += v;
-          return v;
+          const v = row[d] || 0; dealerDailyTotals[d] += v; return v;
         });
         grandDailyTotal += row.total;
         return [row.date, row.rep, ...counts, row.total];
@@ -251,7 +273,7 @@ module.exports = async (req, res) => {
       ['TOTAL', ...ltColumnTotals, ltColumnTotals.reduce((a, b) => a + b, 0)],
     ]);
 
-    // ── 12. Dealer View tab (dropdown + formulas, created once) ───────────
+    // ── 12. Dealer View tab (created once) ────────────────────────────────
     await initDealerViewTab(sheets, spreadsheetId);
 
     // ── Done ──────────────────────────────────────────────────────────────
