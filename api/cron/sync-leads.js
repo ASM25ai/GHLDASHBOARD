@@ -316,7 +316,7 @@ module.exports = async (req, res) => {
 
       const actPctMTD = hub.tracked
         ? (() => {
-            for (const v of [hub.keyboard, hub.active, hub.input_tracked]) {
+            for (const v of [hub.overall, hub.keyboard, hub.active]) {
               if (v > 0 && v < hub.tracked) return `${Math.round((v / hub.tracked) * 100)}%`;
             }
             const combined = (hub.keyboard || 0) + (hub.mouse || 0);
