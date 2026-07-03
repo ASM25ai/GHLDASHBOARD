@@ -29,7 +29,8 @@ module.exports = async (req, res) => {
 
   const locationId = process.env.GHL_LOCATION_ID;
   const now        = new Date();
-  const todayISO   = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const tomorrow    = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+const tomorrowISO = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
 
   const results = {};
 
