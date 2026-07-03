@@ -169,9 +169,12 @@ module.exports = async (req, res) => {
     // ── 7b. Fetch GHL call counts per rep (non-blocking) ─────────────────
     let callStats = {};
     let callError = null;
+    let callDebug = null;
 
     try {
       callStats = await fetchCallStats(REPS, locationId, now, monthStart);
+      callDebug  = callStats._debug || null;
+      delete callStats._debug;
     } catch (err) {
       callError = err.message;
       console.warn('GHL call count fetch failed:', err.message);
@@ -264,7 +267,7 @@ module.exports = async (req, res) => {
       // Use the smarter activity calculation across all Hubstaff fields
       const actPct = hub.tracked
         ? (() => {
-            for (const v of [hub.overall, hub.keyboard, hub.active]) {
+            for (const v of [hub.keyboard, hub.active, hub.input_tracked]) {
               if (v > 0 && v < hub.tracked) return `${Math.round((v / hub.tracked) * 100)}%`;
             }
             const combined = (hub.keyboard || 0) + (hub.mouse || 0);
@@ -316,7 +319,7 @@ module.exports = async (req, res) => {
 
       const actPctMTD = hub.tracked
         ? (() => {
-            for (const v of [hub.overall, hub.keyboard, hub.active]) {
+            for (const v of [hub.keyboard, hub.active, hub.input_tracked]) {
               if (v > 0 && v < hub.tracked) return `${Math.round((v / hub.tracked) * 100)}%`;
             }
             const combined = (hub.keyboard || 0) + (hub.mouse || 0);
@@ -429,7 +432,8 @@ module.exports = async (req, res) => {
       summaryTotals:           { totalToday, totalMtd, totalOrder },
       hubstaffStatus:          hubError ? `failed: ${hubError}` : 'ok',
       callCountStatus:         callError ? `failed: ${callError}` : 'ok',
-      hubstaffRawSample:       hubRawSample, // shows raw field names/values — use to debug activity %
+      callDebug,               // shows convs found + msg types — use to debug call counts
+      hubstaffRawSample:       hubRawSample,
       unmappedDealerValues:    Array.from(unmappedDealers),
       note: unmappedDealers.size
         ? 'Some GHL dealer values were not matched. Add them to Aliases in the Settings tab.'
