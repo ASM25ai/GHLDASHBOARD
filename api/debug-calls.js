@@ -1,10 +1,8 @@
-// api/debug-calls.js
+// api/debug-calls.js — tests the /conversations/messages/export endpoint
 //
-// TEMPORARY diagnostic endpoint — visits one conversation with a call
-// and dumps the raw GHL messages response so we can see the exact
-// field structure. Delete this file once calls are working.
-//
-// Usage: https://your-app.vercel.app/api/debug-calls?secret=YOUR_CRON_SECRET
+// This is the bulk message export endpoint that lets us filter by channel
+// (Call, SMS) for the entire location. Should be 1-2 API calls instead of
+// scanning hundreds of conversations.
 
 const GHL_BASE    = 'https://services.leadconnectorhq.com';
 const GHL_VERSION = '2021-07-28';
@@ -19,7 +17,7 @@ async function ghlGet(path) {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`GHL ${res.status} on ${path}: ${body}`);
+    return { _error: true, status: res.status, body };
   }
   return res.json();
 }
@@ -30,61 +28,42 @@ module.exports = async (req, res) => {
   }
 
   const locationId = process.env.GHL_LOCATION_ID;
+  const now        = new Date();
+  const todayISO   = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
-  try {
-    // Get today's conversations (1 page only — fast)
-    const now     = new Date();
-    const todayMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const results = {};
 
-    const params = new URLSearchParams({
-      locationId,
-      startAfterDate: String(todayMs),
-      limit:          '100',
-    });
+  // Test 1: Export Call messages for today
+  const callParams = new URLSearchParams({
+    locationId,
+    channel: 'Call',
+    startDate: todayISO,
+    endDate:   todayISO,
+    limit:     '50',
+  });
+  results.callExport = await ghlGet(`/conversations/messages/export?${callParams}`);
 
-    let data;
-    try {
-      data = await ghlGet(`/conversations/search?${params}`);
-    } catch {
-      data = await ghlGet(`/conversations/?${params}`);
-    }
+  // Test 2: Export SMS messages for today (just first page)
+  const smsParams = new URLSearchParams({
+    locationId,
+    channel: 'SMS',
+    startDate: todayISO,
+    endDate:   todayISO,
+    limit:     '10',
+  });
+  results.smsExport = await ghlGet(`/conversations/messages/export?${smsParams}`);
 
-    const convs = Array.isArray(data.conversations) ? data.conversations
-                : Array.isArray(data.data)          ? data.data
-                : [];
+  // Test 3: Try without channel filter (gets all non-email)
+  const allParams = new URLSearchParams({
+    locationId,
+    startDate: todayISO,
+    endDate:   todayISO,
+    limit:     '5',
+  });
+  results.allExport = await ghlGet(`/conversations/messages/export?${allParams}`);
 
-    // Find a conversation whose last message is a call
-    const callConv = convs.find(c =>
-      String(c.lastMessageType || '').toLowerCase().includes('call')
-    );
-
-    // Summary of what types we see across today's conversations
-    const typeCounts = {};
-    for (const c of convs) {
-      const t = c.lastMessageType || 'NONE';
-      typeCounts[t] = (typeCounts[t] || 0) + 1;
-    }
-
-    if (!callConv) {
-      return res.status(200).json({
-        note: 'No conversation with a call lastMessageType found in the first 100 of today',
-        convsChecked: convs.length,
-        lastMessageTypeCounts: typeCounts,
-      });
-    }
-
-    // Fetch this conversation's raw messages — the whole point
-    const rawMessages = await ghlGet(`/conversations/${callConv.id}/messages?limit=10`);
-
-    return res.status(200).json({
-      convId:                callConv.id,
-      convLastMessageType:   callConv.lastMessageType,
-      convsChecked:          convs.length,
-      lastMessageTypeCounts: typeCounts,
-      RAW_MESSAGES_RESPONSE: rawMessages, // full untruncated structure
-    });
-
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
+  return res.status(200).json({
+    today: todayISO,
+    results,
+  });
 };
