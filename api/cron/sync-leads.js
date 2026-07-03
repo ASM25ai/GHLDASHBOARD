@@ -248,7 +248,7 @@ module.exports = async (req, res) => {
     // --- TODAY section ---
     const salesTodayRows = [
       [`TODAY — ${dateKey(now)}`],
-      ['Sales Rep', 'Leads Today', 'Calls Today', 'Calls >30s', 'Avg Call Duration', 'Hours Today', 'Activity %'],
+      ['Sales Rep', 'Leads Today', 'Calls Today', 'Calls >30s', 'Avg Duration', 'SMS Today', 'Hours Today', 'Activity %'],
     ];
 
     let totLeadsToday = 0, totCallsToday = 0, totTrackedToday = 0, totActiveToday = 0;
@@ -282,16 +282,24 @@ module.exports = async (req, res) => {
         calls.callsToday,
         calls.calls30sToday,
         calls.avgDurToday,
+        calls.smsToday,
         fmtHours(hub.tracked),
         actPct,
       ]);
     }
 
+    // Compute SMS total for today
+    let totSmsToday = 0;
+    for (const ghlName of repNames) {
+      const c = callStats[ghlName] || {};
+      if (typeof c.smsToday === 'number') totSmsToday += c.smsToday;
+    }
     salesTodayRows.push([
       'TOTAL',
       totLeadsToday,
       totCallsToday,
-      '', '', // calls30s and avgDur totals not meaningful to sum
+      '', '',            // calls30s and avgDur not meaningful to sum
+      totSmsToday,
       fmtHours(totTrackedToday),
       '-',
     ]);
@@ -301,7 +309,7 @@ module.exports = async (req, res) => {
       [],
       [],
       [`MTD — ${monthLabel(now)}`],
-      ['Sales Rep', 'MTD Leads', 'MTD Calls', 'MTD Calls >30s', 'Avg Call Duration', 'MTD Hours', 'Avg Activity %'],
+      ['Sales Rep', 'MTD Leads', 'MTD Calls', 'MTD Calls >30s', 'Avg Duration', 'MTD SMS', 'MTD Hours', 'Avg Activity %'],
     ];
 
     let totLeadsMTD = 0, totCallsMTD = 0, totTrackedMTD = 0, totActiveMTD = 0;
@@ -334,16 +342,23 @@ module.exports = async (req, res) => {
         calls.callsMTD,
         calls.calls30sMTD,
         calls.avgDurMTD,
+        calls.smsMTD,
         fmtHours(hub.tracked),
         actPctMTD,
       ]);
     }
 
+    let totSmsMTD = 0;
+    for (const ghlName of repNames) {
+      const c = callStats[ghlName] || {};
+      if (typeof c.smsMTD === 'number') totSmsMTD += c.smsMTD;
+    }
     salesMTDRows.push([
       'TOTAL',
       totLeadsMTD,
       totCallsMTD,
       '', '',
+      totSmsMTD,
       fmtHours(totTrackedMTD),
       '-',
     ]);
