@@ -171,17 +171,14 @@ module.exports = async (req, res) => {
     let callError = null;
     let callDebug = null;
 
-    // TEMPORARILY DISABLED while we diagnose GHL's message structure via
-    // /api/debug-calls — re-enable by uncommenting once field names are confirmed.
-    // try {
-    //   callStats = await fetchCallStats(REPS, locationId, now, monthStart);
-    //   callDebug  = callStats._debug || null;
-    //   delete callStats._debug;
-    // } catch (err) {
-    //   callError = err.message;
-    //   console.warn('GHL call count fetch failed:', err.message);
-    // }
-    callError = 'temporarily disabled during diagnosis';
+    try {
+      callStats = await fetchCallStats(REPS, locationId, now, monthStart);
+      callDebug  = callStats._debug || null;
+      delete callStats._debug;
+    } catch (err) {
+      callError = err.message;
+      console.warn('GHL call count fetch failed:', err.message);
+    }
 
     // ── 8. Ensure tabs exist ──────────────────────────────────────────────
     const monthTabName = `Qualified Leads - ${monthLabel(now)}`;
