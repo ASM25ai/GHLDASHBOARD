@@ -39,7 +39,7 @@ const tomorrowISO = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1)
     locationId,
     channel: 'Call',
     startDate: todayISO,
-    endDate:   todayISO,
+    endDate:   tomorrowISO,
     limit:     '50',
   });
   results.callExport = await ghlGet(`/conversations/messages/export?${callParams}`);
@@ -49,7 +49,7 @@ const tomorrowISO = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1)
     locationId,
     channel: 'SMS',
     startDate: todayISO,
-    endDate:   todayISO,
+    endDate:   tomorrowISO,
     limit:     '10',
   });
   results.smsExport = await ghlGet(`/conversations/messages/export?${smsParams}`);
@@ -58,7 +58,7 @@ const tomorrowISO = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1)
   const allParams = new URLSearchParams({
     locationId,
     startDate: todayISO,
-    endDate:   todayISO,
+    endDate:   tomorrowISO,
     limit:     '5',
   });
   results.allExport = await ghlGet(`/conversations/messages/export?${allParams}`);
