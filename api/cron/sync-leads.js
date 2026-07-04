@@ -24,6 +24,7 @@ const {
   fmtActivity,
 } = require('../../lib/hubstaff');
 const { fetchCallStats } = require('../../lib/calls');
+const { fetchTwilioSpend } = require('../../lib/twilio');
 const SEED_DEALERS = require('../../lib/dealers');
 const REPS         = require('../../lib/reps');
 
@@ -180,6 +181,17 @@ module.exports = async (req, res) => {
       console.warn('GHL call count fetch failed:', err.message);
     }
 
+    // ── 7c. Fetch Twilio spend (non-blocking) ──────────────────────────────
+    let twilioData = null;
+    let twilioError = null;
+
+    try {
+      twilioData = await fetchTwilioSpend(now, monthStart);
+    } catch (err) {
+      twilioError = err.message;
+      console.warn('Twilio spend fetch failed:', err.message);
+    }
+
     // ── 8. Ensure tabs exist ──────────────────────────────────────────────
     const monthTabName = `Qualified Leads - ${monthLabel(now)}`;
     await ensureTab(sheets, spreadsheetId, monthTabName);
@@ -248,7 +260,7 @@ module.exports = async (req, res) => {
     // --- TODAY section ---
     const salesTodayRows = [
       [`TODAY — ${dateKey(now)}`],
-      ['Sales Rep', 'Leads Today', 'Calls Today', 'Calls >30s', 'Avg Duration', 'SMS Today', 'Hours Today', 'Activity %'],
+      ['Sales Rep', 'Leads', 'Calls', '>30s', 'Avg Dur', 'SMS', 'Hours', 'Activity %', 'Calls/Hr', 'Connect %', 'SMS/Hr', 'Leads/Hr', 'Calls/Lead'],
     ];
 
     let totLeadsToday = 0, totCallsToday = 0, totTrackedToday = 0, totActiveToday = 0;
@@ -276,6 +288,13 @@ module.exports = async (req, res) => {
           })()
         : '-';
 
+      const hrs = hub.tracked / 3600; // decimal hours for math
+      const callsPerHr  = hrs > 0 ? (calls.callsToday / hrs).toFixed(1) : '-';
+      const connectPct  = calls.callsToday > 0 ? `${Math.round((calls.calls30sToday / calls.callsToday) * 100)}%` : '-';
+      const smsPerHr    = hrs > 0 ? (calls.smsToday / hrs).toFixed(1) : '-';
+      const leadsPerHr  = hrs > 0 ? (leads_.today / hrs).toFixed(2) : '-';
+      const callsPerLead = leads_.today > 0 ? Math.round(calls.callsToday / leads_.today) : '-';
+
       salesTodayRows.push([
         `${ghlName} (${rep.displayName})`,
         leads_.today,
@@ -285,23 +304,35 @@ module.exports = async (req, res) => {
         calls.smsToday,
         fmtHours(hub.tracked),
         actPct,
+        callsPerHr,
+        connectPct,
+        smsPerHr,
+        leadsPerHr,
+        callsPerLead,
       ]);
     }
 
-    // Compute SMS total for today
-    let totSmsToday = 0;
+    let totSmsToday = 0, totCalls30sToday = 0;
     for (const ghlName of repNames) {
       const c = callStats[ghlName] || {};
       if (typeof c.smsToday === 'number') totSmsToday += c.smsToday;
+      if (typeof c.calls30sToday === 'number') totCalls30sToday += c.calls30sToday;
     }
+    const totHrsToday = totTrackedToday / 3600;
     salesTodayRows.push([
       'TOTAL',
       totLeadsToday,
       totCallsToday,
-      '', '',            // calls30s and avgDur not meaningful to sum
+      totCalls30sToday,
+      '',
       totSmsToday,
       fmtHours(totTrackedToday),
       '-',
+      totHrsToday > 0 ? (totCallsToday / totHrsToday).toFixed(1) : '-',
+      totCallsToday > 0 ? `${Math.round((totCalls30sToday / totCallsToday) * 100)}%` : '-',
+      totHrsToday > 0 ? (totSmsToday / totHrsToday).toFixed(1) : '-',
+      totHrsToday > 0 ? (totLeadsToday / totHrsToday).toFixed(2) : '-',
+      totLeadsToday > 0 ? Math.round(totCallsToday / totLeadsToday) : '-',
     ]);
 
     // --- MTD section (2 blank rows gap) ---
@@ -309,7 +340,7 @@ module.exports = async (req, res) => {
       [],
       [],
       [`MTD — ${monthLabel(now)}`],
-      ['Sales Rep', 'MTD Leads', 'MTD Calls', 'MTD Calls >30s', 'Avg Duration', 'MTD SMS', 'MTD Hours', 'Avg Activity %'],
+      ['Sales Rep', 'Leads', 'Calls', '>30s', 'Avg Dur', 'SMS', 'Hours', 'Activity %', 'Calls/Hr', 'Connect %', 'SMS/Hr', 'Leads/Hr', 'Calls/Lead'],
     ];
 
     let totLeadsMTD = 0, totCallsMTD = 0, totTrackedMTD = 0, totActiveMTD = 0;
@@ -336,6 +367,13 @@ module.exports = async (req, res) => {
           })()
         : '-';
 
+      const hrsM = hub.tracked / 3600;
+      const callsPerHrM  = hrsM > 0 ? (calls.callsMTD / hrsM).toFixed(1) : '-';
+      const connectPctM  = calls.callsMTD > 0 ? `${Math.round((calls.calls30sMTD / calls.callsMTD) * 100)}%` : '-';
+      const smsPerHrM    = hrsM > 0 ? (calls.smsMTD / hrsM).toFixed(1) : '-';
+      const leadsPerHrM  = hrsM > 0 ? (leads_.mtd / hrsM).toFixed(2) : '-';
+      const callsPerLeadM = leads_.mtd > 0 ? Math.round(calls.callsMTD / leads_.mtd) : '-';
+
       salesMTDRows.push([
         `${ghlName} (${rep.displayName})`,
         leads_.mtd,
@@ -345,22 +383,35 @@ module.exports = async (req, res) => {
         calls.smsMTD,
         fmtHours(hub.tracked),
         actPctMTD,
+        callsPerHrM,
+        connectPctM,
+        smsPerHrM,
+        leadsPerHrM,
+        callsPerLeadM,
       ]);
     }
 
-    let totSmsMTD = 0;
+    let totSmsMTD = 0, totCalls30sMTD = 0;
     for (const ghlName of repNames) {
       const c = callStats[ghlName] || {};
       if (typeof c.smsMTD === 'number') totSmsMTD += c.smsMTD;
+      if (typeof c.calls30sMTD === 'number') totCalls30sMTD += c.calls30sMTD;
     }
+    const totHrsMTD = totTrackedMTD / 3600;
     salesMTDRows.push([
       'TOTAL',
       totLeadsMTD,
       totCallsMTD,
-      '', '',
+      totCalls30sMTD,
+      '',
       totSmsMTD,
       fmtHours(totTrackedMTD),
       '-',
+      totHrsMTD > 0 ? (totCallsMTD / totHrsMTD).toFixed(1) : '-',
+      totCallsMTD > 0 ? `${Math.round((totCalls30sMTD / totCallsMTD) * 100)}%` : '-',
+      totHrsMTD > 0 ? (totSmsMTD / totHrsMTD).toFixed(1) : '-',
+      totHrsMTD > 0 ? (totLeadsMTD / totHrsMTD).toFixed(2) : '-',
+      totLeadsMTD > 0 ? Math.round(totCallsMTD / totLeadsMTD) : '-',
     ]);
 
     if (hubError) {
@@ -447,6 +498,7 @@ module.exports = async (req, res) => {
       summaryTotals:           { totalToday, totalMtd, totalOrder },
       hubstaffStatus:          hubError ? `failed: ${hubError}` : 'ok',
       callCountStatus:         callError ? `failed: ${callError}` : 'ok',
+      twilioStatus:            twilioError ? `failed: ${twilioError}` : (twilioData ? 'ok' : 'skipped'),
       callDebug,               // shows convs found + msg types — use to debug call counts
       hubstaffRawSample:       hubRawSample,
       unmappedDealerValues:    Array.from(unmappedDealers),
