@@ -3,6 +3,9 @@ const {
   findFieldIdByKey,
   normalizeCustomFields,
   fetchQualifiedLeadsDayByDay,
+  fetchNewLeadsDayByDay,
+  detectLeadSource,
+  normalizeProvince,
 } = require('../../lib/ghl');
 const {
   getSheetsClient,
@@ -72,17 +75,21 @@ module.exports = async (req, res) => {
     const qualifiedDateFieldId = findFieldIdByKey(fieldMap, 'qualified_date');
     if (!qualifiedDateFieldId) throw new Error('Could not find custom field "qualified_date".');
 
+    const createdDateFieldId = findFieldIdByKey(fieldMap, 'created_date');
+    if (!createdDateFieldId) throw new Error('Could not find custom field "created_date".');
+
     // ── 2. Date range ──────────────────────────────────────────────────────
     const now        = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    // ── 3. Pull qualified leads day-by-day from GHL ───────────────────────
-    const contacts = await fetchQualifiedLeadsDayByDay(
-      locationId, qualifiedDateFieldId, monthStart, now
-    );
+    // ── 3. Pull qualified leads + new leads + Sheets auth in parallel ────
+    const [contacts, newLeadContacts, sheets] = await Promise.all([
+      fetchQualifiedLeadsDayByDay(locationId, qualifiedDateFieldId, monthStart, now),
+      fetchNewLeadsDayByDay(locationId, createdDateFieldId, monthStart, now),
+      getSheetsClient(),
+    ]);
 
-    // ── 4. Sheets client + Settings ───────────────────────────────────────
-    const sheets = await getSheetsClient();
+    // ── 4. Settings ────────────────────────────────────────────────────────
     await initSettingsTab(sheets, spreadsheetId, SEED_DEALERS);
     const settings = await readSettings(sheets, spreadsheetId);
 
@@ -106,10 +113,13 @@ module.exports = async (req, res) => {
       const rawType  = raw.lead_type1;
       const leadType = Array.isArray(rawType) ? (rawType[0] || '') : (rawType || '');
 
+      const leadSource = detectLeadSource(contact, raw);
+      const province   = normalizeProvince(contact.state || raw.state || '');
+
       if (!settings.dealers.includes(dealer) && dealer) {
         unmappedDealers.add(raw.dealership || '(blank)');
       }
-      leads.push({ contact, qDate, dealer, fm, salesRep, leadType });
+      leads.push({ contact, qDate, dealer, fm, salesRep, leadType, leadSource, province });
     }
 
     // ── 6. Aggregate dealer + FM stats ────────────────────────────────────
@@ -200,14 +210,15 @@ module.exports = async (req, res) => {
     await ensureTab(sheets, spreadsheetId, 'Sales Rep');
     await ensureTab(sheets, spreadsheetId, 'Daily Breakdown');
     await ensureTab(sheets, spreadsheetId, 'Lead Type Breakdown');
+    await ensureTab(sheets, spreadsheetId, 'Daily Leads Breakdown');
 
     // ── 9. Raw data tabs ──────────────────────────────────────────────────
     const rawHeaders = [
       'Contact ID', 'Qualified Date', 'Dealer', 'FM',
-      'Sales Rep', 'Lead Type', 'Contact Name', 'Phone', 'Email', 'Last Synced',
+      'Sales Rep', 'Lead Type', 'Lead Source', 'Province', 'Contact Name', 'Phone', 'Email', 'Last Synced',
     ];
-    const rawDataRows = leads.map(({ contact, qDate, dealer, fm, salesRep, leadType }) => [
-      contact.id, dateKey(qDate), dealer, fm, salesRep, leadType,
+    const rawDataRows = leads.map(({ contact, qDate, dealer, fm, salesRep, leadType, leadSource, province }) => [
+      contact.id, dateKey(qDate), dealer, fm, salesRep, leadType, leadSource, province,
       `${contact.firstName || ''} ${contact.lastName || ''}`.trim(),
       contact.phone || '', contact.email || '', syncedAt,
     ]);
@@ -487,7 +498,123 @@ module.exports = async (req, res) => {
       ['TOTAL', ...ltColumnTotals, ltColumnTotals.reduce((a, b) => a + b, 0)],
     ]);
 
-    // ── 14. Dealer View tab (created once) ────────────────────────────────
+    // ── 14. Daily Leads Breakdown ────────────────────────────────────────
+    //
+    // Counts ALL new leads created per day (using the created_date custom
+    // field query). For each day: total, source breakdown, province breakdown,
+    // qualified vs unqualified.
+    //
+    // A lead is "truly new" if created_date falls on that day AND the
+    // standard dateAdded also falls on the same day. If created_date is
+    // older than dateAdded, it's a resubmit — we still count it under
+    // created_date's day since that's when the contact was first created.
+
+    // Build a set of qualified contact IDs for quick lookup
+    const qualifiedContactIds = new Set(leads.map((l) => l.contact.id));
+
+    // Normalize new leads and bucket by day
+    const SOURCE_COLS = ['FB Webform', 'Google Webform', 'FB Lead Form', 'FB Messenger', 'Google Call', 'Other'];
+    const dailyBuckets = {}; // dateKey → { total, sources: {}, provinces: {}, qualified, unqualified }
+    const allProvinces = new Set();
+
+    for (const contact of newLeadContacts) {
+      const raw = normalizeCustomFields(contact, fieldMap);
+      const createdDate = parseDate(raw.created_date);
+      if (!createdDate || createdDate < monthStart || createdDate > now) continue;
+
+      const dk = dateKey(createdDate);
+      if (!dailyBuckets[dk]) {
+        dailyBuckets[dk] = {
+          total: 0,
+          sources: {},
+          provinces: {},
+          qualified: 0,
+          unqualified: 0,
+        };
+        for (const s of SOURCE_COLS) dailyBuckets[dk].sources[s] = 0;
+      }
+
+      const bucket = dailyBuckets[dk];
+      bucket.total++;
+
+      // Lead source
+      const source = detectLeadSource(contact, raw);
+      bucket.sources[source] = (bucket.sources[source] || 0) + 1;
+
+      // Province
+      const prov = normalizeProvince(contact.state || raw.state || '');
+      allProvinces.add(prov);
+      bucket.provinces[prov] = (bucket.provinces[prov] || 0) + 1;
+
+      // Qualified check — does this contact have a qualified_date set?
+      if (qualifiedContactIds.has(contact.id)) {
+        bucket.qualified++;
+      } else {
+        bucket.unqualified++;
+      }
+    }
+
+    // Sort provinces for consistent column order (ON, QC first, then alpha)
+    const provPriority = { ON: 0, QC: 1, AB: 2, BC: 3 };
+    const sortedProvinces = Array.from(allProvinces).sort((a, b) => {
+      const pa = provPriority[a] ?? 99, pb = provPriority[b] ?? 99;
+      return pa !== pb ? pa - pb : a.localeCompare(b);
+    });
+
+    // Build rows sorted by date
+    const dailyDates = Object.keys(dailyBuckets).sort();
+    const dailyLeadsHeader = [
+      'Date', 'Total New Leads',
+      ...SOURCE_COLS,
+      ...sortedProvinces,
+      'Qualified', 'Unqualified',
+    ];
+
+    const dailyLeadsRows = [dailyLeadsHeader];
+    const dailyTotals = {
+      total: 0, qualified: 0, unqualified: 0,
+      sources: {}, provinces: {},
+    };
+    for (const s of SOURCE_COLS) dailyTotals.sources[s] = 0;
+    for (const p of sortedProvinces) dailyTotals.provinces[p] = 0;
+
+    for (const dk of dailyDates) {
+      const b = dailyBuckets[dk];
+      dailyTotals.total       += b.total;
+      dailyTotals.qualified   += b.qualified;
+      dailyTotals.unqualified += b.unqualified;
+
+      const sourceVals = SOURCE_COLS.map((s) => {
+        const v = b.sources[s] || 0;
+        dailyTotals.sources[s] += v;
+        return v;
+      });
+
+      const provVals = sortedProvinces.map((p) => {
+        const v = b.provinces[p] || 0;
+        dailyTotals.provinces[p] += v;
+        return v;
+      });
+
+      dailyLeadsRows.push([
+        dk, b.total,
+        ...sourceVals,
+        ...provVals,
+        b.qualified, b.unqualified,
+      ]);
+    }
+
+    // TOTAL row
+    dailyLeadsRows.push([
+      'TOTAL', dailyTotals.total,
+      ...SOURCE_COLS.map((s) => dailyTotals.sources[s]),
+      ...sortedProvinces.map((p) => dailyTotals.provinces[p]),
+      dailyTotals.qualified, dailyTotals.unqualified,
+    ]);
+
+    await clearAndWrite(sheets, spreadsheetId, 'Daily Leads Breakdown', dailyLeadsRows);
+
+    // ── 15. Dealer View tab (created once) ────────────────────────────────
     await initDealerViewTab(sheets, spreadsheetId);
 
     // ── Done ──────────────────────────────────────────────────────────────
@@ -495,6 +622,7 @@ module.exports = async (req, res) => {
       ok:                      true,
       monthTab:                monthTabName,
       qualifiedLeadsThisMonth: leads.length,
+      newLeadsThisMonth:       newLeadContacts.length,
       summaryTotals:           { totalToday, totalMtd, totalOrder },
       hubstaffStatus:          hubError ? `failed: ${hubError}` : 'ok',
       callCountStatus:         callError ? `failed: ${callError}` : 'ok',
