@@ -1,9 +1,9 @@
 // api/cron/sync-daily-leads.js
 //
 // Separate cron endpoint for the Daily Leads Breakdown tab.
-// Split from sync-leads.js to stay within Vercel's function timeout.
 // Queries GHL by created_date custom field, then builds the daily
-// breakdown with source, province, and qualified/unqualified counts.
+// breakdown with source, province (grouped), and qualified/unqualified counts.
+// Applies color formatting to visually separate sections.
 
 const {
   fetchCustomFieldIdToKeyMap,
@@ -12,11 +12,14 @@ const {
   fetchNewLeadsDayByDay,
   detectLeadSource,
   normalizeProvince,
+  getProvinceGroup,
 } = require('../../lib/ghl');
 const {
   getSheetsClient,
   ensureTab,
   clearAndWrite,
+  applyColumnColors,
+  boldRow,
 } = require('../../lib/sheets');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -47,8 +50,6 @@ module.exports = async (req, res) => {
     const createdDateFieldId = findFieldIdByKey(fieldMap, 'created_date');
     if (!createdDateFieldId) throw new Error('Could not find custom field "created_date".');
 
-    const qualifiedDateFieldId = findFieldIdByKey(fieldMap, 'qualified_date');
-
     // ── 2. Date range ──────────────────────────────────────────────────────
     const now        = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -64,8 +65,9 @@ module.exports = async (req, res) => {
 
     // ── 5. Bucket leads by day ────────────────────────────────────────────
     const SOURCE_COLS = ['FB Webform', 'Google Webform', 'FB Lead Form', 'FB Messenger', 'Google Call', 'Other'];
+    const PROVINCE_GROUPS = ['Ontario', 'Quebec', 'Alberta', 'BC', 'Atlantic/Other', 'Unknown'];
+
     const dailyBuckets = {};
-    const allProvinces = new Set();
 
     for (const contact of newLeadContacts) {
       const raw = normalizeCustomFields(contact, fieldMap);
@@ -82,6 +84,7 @@ module.exports = async (req, res) => {
           unqualified: 0,
         };
         for (const s of SOURCE_COLS) dailyBuckets[dk].sources[s] = 0;
+        for (const p of PROVINCE_GROUPS) dailyBuckets[dk].provinces[p] = 0;
       }
 
       const bucket = dailyBuckets[dk];
@@ -91,12 +94,12 @@ module.exports = async (req, res) => {
       const source = detectLeadSource(contact, raw);
       bucket.sources[source] = (bucket.sources[source] || 0) + 1;
 
-      // Province from state field
-      const prov = normalizeProvince(contact.state || raw.state || '');
-      allProvinces.add(prov);
-      bucket.provinces[prov] = (bucket.provinces[prov] || 0) + 1;
+      // Province — normalize then group
+      const provCode = normalizeProvince(contact.state || raw.state || '');
+      const provGroup = getProvinceGroup(provCode);
+      bucket.provinces[provGroup] = (bucket.provinces[provGroup] || 0) + 1;
 
-      // Qualified = has a qualified_date custom field value set
+      // Qualified check — has a qualified_date custom field value set?
       const qDate = raw.qualified_date;
       if (qDate) {
         bucket.qualified++;
@@ -105,19 +108,20 @@ module.exports = async (req, res) => {
       }
     }
 
-    // ── 6. Sort provinces (ON, QC, AB, BC first, then alpha) ──────────────
-    const provPriority = { ON: 0, QC: 1, AB: 2, BC: 3 };
-    const sortedProvinces = Array.from(allProvinces).sort((a, b) => {
-      const pa = provPriority[a] ?? 99, pb = provPriority[b] ?? 99;
-      return pa !== pb ? pa - pb : a.localeCompare(b);
-    });
-
-    // ── 7. Build sheet rows ───────────────────────────────────────────────
+    // ── 6. Build sheet rows ───────────────────────────────────────────────
+    //
+    // Layout with visual sections:
+    //   A: Date  |  B: Total  |  C-H: Sources  |  I-N: Provinces  |  O-P: Qualified/Unqualified
+    //
     const dailyDates = Object.keys(dailyBuckets).sort();
+
     const header = [
       'Date', 'Total New Leads',
+      // ── Sources (blue) ──
       ...SOURCE_COLS,
-      ...sortedProvinces,
+      // ── Provinces (green) ──
+      ...PROVINCE_GROUPS,
+      // ── Status (orange) ──
       'Qualified', 'Unqualified',
     ];
 
@@ -127,7 +131,7 @@ module.exports = async (req, res) => {
       sources: {}, provinces: {},
     };
     for (const s of SOURCE_COLS) totals.sources[s] = 0;
-    for (const p of sortedProvinces) totals.provinces[p] = 0;
+    for (const p of PROVINCE_GROUPS) totals.provinces[p] = 0;
 
     for (const dk of dailyDates) {
       const b = dailyBuckets[dk];
@@ -141,7 +145,7 @@ module.exports = async (req, res) => {
         return v;
       });
 
-      const provVals = sortedProvinces.map((p) => {
+      const provVals = PROVINCE_GROUPS.map((p) => {
         const v = b.provinces[p] || 0;
         totals.provinces[p] += v;
         return v;
@@ -159,21 +163,66 @@ module.exports = async (req, res) => {
     rows.push([
       'TOTAL', totals.total,
       ...SOURCE_COLS.map((s) => totals.sources[s]),
-      ...sortedProvinces.map((p) => totals.provinces[p]),
+      ...PROVINCE_GROUPS.map((p) => totals.provinces[p]),
       totals.qualified, totals.unqualified,
     ]);
 
     await clearAndWrite(sheets, spreadsheetId, 'Daily Leads Breakdown', rows);
 
+    // ── 7. Apply color formatting ─────────────────────────────────────────
+    //
+    // Column indices (0-based):
+    //   A=0 (Date), B=1 (Total)
+    //   C-H = 2-7 (Sources, 6 cols)           → Blue
+    //   I-N = 8-13 (Provinces, 6 cols)         → Green
+    //   O-P = 14-15 (Qualified/Unqualified)    → Orange
+    //
+    const sourceStart = 2;
+    const sourceEnd   = sourceStart + SOURCE_COLS.length;     // 8
+    const provStart   = sourceEnd;
+    const provEnd     = provStart + PROVINCE_GROUPS.length;   // 14
+    const statusStart = provEnd;
+    const statusEnd   = statusStart + 2;                      // 16
+
+    await applyColumnColors(sheets, spreadsheetId, 'Daily Leads Breakdown', [
+      // Date + Total — light gray header
+      {
+        startCol: 0, endCol: 2,
+        color:       { red: 0.95, green: 0.95, blue: 0.95 },
+        headerColor: { red: 0.85, green: 0.85, blue: 0.85 },
+      },
+      // Sources — light blue
+      {
+        startCol: sourceStart, endCol: sourceEnd,
+        color:       { red: 0.87, green: 0.92, blue: 1.0 },
+        headerColor: { red: 0.62, green: 0.77, blue: 0.91 },
+      },
+      // Provinces — light green
+      {
+        startCol: provStart, endCol: provEnd,
+        color:       { red: 0.85, green: 0.94, blue: 0.85 },
+        headerColor: { red: 0.6,  green: 0.8,  blue: 0.6  },
+      },
+      // Qualified/Unqualified — light orange
+      {
+        startCol: statusStart, endCol: statusEnd,
+        color:       { red: 1.0,  green: 0.93, blue: 0.82 },
+        headerColor: { red: 0.96, green: 0.79, blue: 0.55 },
+      },
+    ]);
+
+    // Bold the TOTAL row (header is row 0, data rows, then TOTAL)
+    const totalRowIndex = rows.length - 1; // 0-based row index in the sheet
+    await boldRow(sheets, spreadsheetId, 'Daily Leads Breakdown', totalRowIndex);
+
     const syncedAt = now.toISOString();
 
     return res.status(200).json({
-      ok:              true,
+      ok:               true,
       newLeadsThisMonth: newLeadContacts.length,
-      daysWithData:    dailyDates.length,
-      totalQualified:  totals.qualified,
+      daysWithData:     dailyDates.length,
+      totalQualified:   totals.qualified,
       totalUnqualified: totals.unqualified,
-      provincesFound:  sortedProvinces,
       syncedAt,
     });
 
