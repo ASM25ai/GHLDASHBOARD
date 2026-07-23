@@ -11,8 +11,14 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Call Vercel sync endpoint
+      - name: Call Vercel sync endpoint (qualified leads)
         run: |
           curl -sS -f \
             "${{ secrets.VERCEL_SYNC_URL }}?secret=${{ secrets.CRON_SECRET }}" \
             || (echo "Sync call failed" && exit 1)
+
+      - name: Call Vercel sync endpoint (daily leads breakdown)
+        run: |
+          curl -sS -f \
+            "${{ secrets.VERCEL_DAILY_LEADS_URL }}?secret=${{ secrets.CRON_SECRET }}" \
+            || (echo "Daily leads sync call failed" && exit 1)
