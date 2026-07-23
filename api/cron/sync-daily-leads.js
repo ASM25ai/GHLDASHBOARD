@@ -82,8 +82,12 @@ module.exports = async (req, res) => {
           provinces: {},
           qualified: 0,
           unqualified: 0,
+          qualifiedBySource: {},
         };
-        for (const s of SOURCE_COLS) dailyBuckets[dk].sources[s] = 0;
+        for (const s of SOURCE_COLS) {
+          dailyBuckets[dk].sources[s] = 0;
+          dailyBuckets[dk].qualifiedBySource[s] = 0;
+        }
         for (const p of PROVINCE_GROUPS) dailyBuckets[dk].provinces[p] = 0;
       }
 
@@ -103,6 +107,7 @@ module.exports = async (req, res) => {
       const qDate = parseDate(raw.qualified_date);
       if (qDate && qDate >= monthStart && qDate <= now) {
         bucket.qualified++;
+        bucket.qualifiedBySource[source] = (bucket.qualifiedBySource[source] || 0) + 1;
       } else {
         bucket.unqualified++;
       }
@@ -111,8 +116,13 @@ module.exports = async (req, res) => {
     // ── 6. Build sheet rows ───────────────────────────────────────────────
     //
     // Layout with visual sections:
-    //   A: Date  |  B: Total  |  C-H: Sources  |  I-N: Provinces  |  O-P: Qualified/Unqualified
+    //   A: Date  |  B: Total
+    //   C-H: Lead Sources (blue)
+    //   I-N: Provinces (green)
+    //   O: Total Qualified | P-U: Qualified by Source | V: Unqualified (orange)
     //
+    const QUAL_SOURCE_COLS = SOURCE_COLS.map((s) => `Q: ${s}`);
+
     const dailyDates = Object.keys(dailyBuckets).sort();
 
     const header = [
@@ -121,16 +131,19 @@ module.exports = async (req, res) => {
       ...SOURCE_COLS,
       // ── Provinces (green) ──
       ...PROVINCE_GROUPS,
-      // ── Status (orange) ──
-      'Qualified', 'Unqualified',
+      // ── Qualified breakdown (orange) ──
+      'Total Qualified', ...QUAL_SOURCE_COLS, 'Unqualified',
     ];
 
     const rows = [header];
     const totals = {
       total: 0, qualified: 0, unqualified: 0,
-      sources: {}, provinces: {},
+      sources: {}, provinces: {}, qualifiedBySource: {},
     };
-    for (const s of SOURCE_COLS) totals.sources[s] = 0;
+    for (const s of SOURCE_COLS) {
+      totals.sources[s] = 0;
+      totals.qualifiedBySource[s] = 0;
+    }
     for (const p of PROVINCE_GROUPS) totals.provinces[p] = 0;
 
     for (const dk of dailyDates) {
@@ -151,11 +164,17 @@ module.exports = async (req, res) => {
         return v;
       });
 
+      const qualSourceVals = SOURCE_COLS.map((s) => {
+        const v = b.qualifiedBySource[s] || 0;
+        totals.qualifiedBySource[s] += v;
+        return v;
+      });
+
       rows.push([
         dk, b.total,
         ...sourceVals,
         ...provVals,
-        b.qualified, b.unqualified,
+        b.qualified, ...qualSourceVals, b.unqualified,
       ]);
     }
 
@@ -164,25 +183,20 @@ module.exports = async (req, res) => {
       'TOTAL', totals.total,
       ...SOURCE_COLS.map((s) => totals.sources[s]),
       ...PROVINCE_GROUPS.map((p) => totals.provinces[p]),
-      totals.qualified, totals.unqualified,
+      totals.qualified,
+      ...SOURCE_COLS.map((s) => totals.qualifiedBySource[s]),
+      totals.unqualified,
     ]);
 
     await clearAndWrite(sheets, spreadsheetId, 'Daily Leads Breakdown', rows);
 
     // ── 7. Apply color formatting ─────────────────────────────────────────
-    //
-    // Column indices (0-based):
-    //   A=0 (Date), B=1 (Total)
-    //   C-H = 2-7 (Sources, 6 cols)           → Blue
-    //   I-N = 8-13 (Provinces, 6 cols)         → Green
-    //   O-P = 14-15 (Qualified/Unqualified)    → Orange
-    //
     const sourceStart = 2;
-    const sourceEnd   = sourceStart + SOURCE_COLS.length;     // 8
+    const sourceEnd   = sourceStart + SOURCE_COLS.length;                // 8
     const provStart   = sourceEnd;
-    const provEnd     = provStart + PROVINCE_GROUPS.length;   // 14
+    const provEnd     = provStart + PROVINCE_GROUPS.length;              // 14
     const statusStart = provEnd;
-    const statusEnd   = statusStart + 2;                      // 16
+    const statusEnd   = statusStart + 1 + SOURCE_COLS.length + 1;       // Total Qual + 6 Q:source + Unqualified = 8
 
     await applyColumnColors(sheets, spreadsheetId, 'Daily Leads Breakdown', [
       // Date + Total — light gray header
@@ -203,7 +217,7 @@ module.exports = async (req, res) => {
         color:       { red: 0.85, green: 0.94, blue: 0.85 },
         headerColor: { red: 0.6,  green: 0.8,  blue: 0.6  },
       },
-      // Qualified/Unqualified — light orange
+      // Qualified breakdown — light orange
       {
         startCol: statusStart, endCol: statusEnd,
         color:       { red: 1.0,  green: 0.93, blue: 0.82 },
