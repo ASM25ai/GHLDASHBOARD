@@ -99,9 +99,9 @@ module.exports = async (req, res) => {
       const provGroup = getProvinceGroup(provCode);
       bucket.provinces[provGroup] = (bucket.provinces[provGroup] || 0) + 1;
 
-      // Qualified check — has a qualified_date custom field value set?
-      const qDate = raw.qualified_date;
-      if (qDate) {
+      // Qualified check — qualified_date must fall within current month
+      const qDate = parseDate(raw.qualified_date);
+      if (qDate && qDate >= monthStart && qDate <= now) {
         bucket.qualified++;
       } else {
         bucket.unqualified++;
