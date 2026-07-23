@@ -3,6 +3,8 @@ const {
   findFieldIdByKey,
   normalizeCustomFields,
   fetchQualifiedLeadsDayByDay,
+  detectLeadSource,
+  normalizeProvince,
 } = require('../../lib/ghl');
 const {
   getSheetsClient,
@@ -106,10 +108,13 @@ module.exports = async (req, res) => {
       const rawType  = raw.lead_type1;
       const leadType = Array.isArray(rawType) ? (rawType[0] || '') : (rawType || '');
 
+      const leadSource = detectLeadSource(contact, raw);
+      const province   = normalizeProvince(contact.state || raw.state || '');
+
       if (!settings.dealers.includes(dealer) && dealer) {
         unmappedDealers.add(raw.dealership || '(blank)');
       }
-      leads.push({ contact, qDate, dealer, fm, salesRep, leadType });
+      leads.push({ contact, qDate, dealer, fm, salesRep, leadType, leadSource, province });
     }
 
     // ── 6. Aggregate dealer + FM stats ────────────────────────────────────
@@ -204,10 +209,10 @@ module.exports = async (req, res) => {
     // ── 9. Raw data tabs ──────────────────────────────────────────────────
     const rawHeaders = [
       'Contact ID', 'Qualified Date', 'Dealer', 'FM',
-      'Sales Rep', 'Lead Type', 'Contact Name', 'Phone', 'Email', 'Last Synced',
+      'Sales Rep', 'Lead Type', 'Lead Source', 'Province', 'Contact Name', 'Phone', 'Email', 'Last Synced',
     ];
-    const rawDataRows = leads.map(({ contact, qDate, dealer, fm, salesRep, leadType }) => [
-      contact.id, dateKey(qDate), dealer, fm, salesRep, leadType,
+    const rawDataRows = leads.map(({ contact, qDate, dealer, fm, salesRep, leadType, leadSource, province }) => [
+      contact.id, dateKey(qDate), dealer, fm, salesRep, leadType, leadSource, province,
       `${contact.firstName || ''} ${contact.lastName || ''}`.trim(),
       contact.phone || '', contact.email || '', syncedAt,
     ]);

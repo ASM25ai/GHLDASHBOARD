@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/cron/sync-leads.js": {
+      "maxDuration": 60
+    },
+    "api/cron/sync-daily-leads.js": {
+      "maxDuration": 60
+    }
+  }
+}
