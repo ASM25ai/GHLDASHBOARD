@@ -18,9 +18,11 @@ const {
   getSheetsClient,
   ensureTab,
   clearAndWrite,
+  readSettings,
   applyColumnColors,
   boldRow,
 } = require('../../lib/sheets');
+const { normalizeDealer } = require('../../lib/aliases');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -62,12 +64,18 @@ module.exports = async (req, res) => {
     // ── 4. Sheets client ──────────────────────────────────────────────────
     const sheets = await getSheetsClient();
     await ensureTab(sheets, spreadsheetId, 'Daily Leads Breakdown');
+    await ensureTab(sheets, spreadsheetId, 'Dealer Source Breakdown');
+
+    // Read dealer alias settings for normalization
+    const settings = await readSettings(sheets, spreadsheetId);
 
     // ── 5. Bucket leads by day ────────────────────────────────────────────
     const SOURCE_COLS = ['FB Webform', 'Google Webform', 'FB Lead Form', 'FB Messenger', 'Google Call', 'Other'];
     const PROVINCE_GROUPS = ['Ontario', 'Quebec', 'Alberta', 'BC', 'Atlantic/Other', 'Unknown'];
 
     const dailyBuckets = {};
+    // Dealer × Source matrix for qualified leads
+    const dealerSourceMap = {}; // dealer → { source → count }
 
     for (const contact of newLeadContacts) {
       const raw = normalizeCustomFields(contact, fieldMap);
@@ -108,6 +116,14 @@ module.exports = async (req, res) => {
       if (qDate && qDate >= monthStart && qDate <= now) {
         bucket.qualified++;
         bucket.qualifiedBySource[source] = (bucket.qualifiedBySource[source] || 0) + 1;
+
+        // Track dealer × source for qualified leads
+        const dealer = normalizeDealer(raw.dealership, settings.aliasMap) || raw.dealership || 'Unassigned';
+        if (!dealerSourceMap[dealer]) {
+          dealerSourceMap[dealer] = {};
+          for (const s of SOURCE_COLS) dealerSourceMap[dealer][s] = 0;
+        }
+        dealerSourceMap[dealer][source] = (dealerSourceMap[dealer][source] || 0) + 1;
       } else {
         bucket.unqualified++;
       }
@@ -228,6 +244,74 @@ module.exports = async (req, res) => {
     // Bold the TOTAL row (header is row 0, data rows, then TOTAL)
     const totalRowIndex = rows.length - 1; // 0-based row index in the sheet
     await boldRow(sheets, spreadsheetId, 'Daily Leads Breakdown', totalRowIndex);
+
+    // ── 8. Dealer Source Breakdown tab ────────────────────────────────────
+    //
+    // Rows = dealers (sorted by total qualified desc)
+    // Cols = FB Webform | Google Webform | FB Lead Form | FB Messenger | Google Call | Other | Total
+    //
+    const dealerSourceHeader = ['Dealer', ...SOURCE_COLS, 'Total Qualified'];
+
+    const dealerRows = Object.entries(dealerSourceMap)
+      .map(([dealer, sources]) => {
+        const sourceVals = SOURCE_COLS.map((s) => sources[s] || 0);
+        const total = sourceVals.reduce((a, b) => a + b, 0);
+        return { dealer, sourceVals, total };
+      })
+      .sort((a, b) => b.total - a.total); // highest total first
+
+    const dealerSheetRows = [dealerSourceHeader];
+
+    // Grand totals
+    const dealerGrandTotals = {};
+    for (const s of SOURCE_COLS) dealerGrandTotals[s] = 0;
+    let grandTotal = 0;
+
+    for (const { dealer, sourceVals, total } of dealerRows) {
+      dealerSheetRows.push([dealer, ...sourceVals, total]);
+      SOURCE_COLS.forEach((s, i) => { dealerGrandTotals[s] += sourceVals[i]; });
+      grandTotal += total;
+    }
+
+    // TOTAL row
+    dealerSheetRows.push([
+      'TOTAL',
+      ...SOURCE_COLS.map((s) => dealerGrandTotals[s]),
+      grandTotal,
+    ]);
+
+    await clearAndWrite(sheets, spreadsheetId, 'Dealer Source Breakdown', dealerSheetRows);
+
+    // Color formatting for Dealer Source Breakdown
+    const dsSourceStart = 1;
+    const dsSourceEnd   = dsSourceStart + SOURCE_COLS.length; // 7
+    const dsTotalStart  = dsSourceEnd;
+    const dsTotalEnd    = dsTotalStart + 1;                   // 8
+
+    await applyColumnColors(sheets, spreadsheetId, 'Dealer Source Breakdown', [
+      // Dealer name — light gray
+      {
+        startCol: 0, endCol: 1,
+        color:       { red: 0.95, green: 0.95, blue: 0.95 },
+        headerColor: { red: 0.85, green: 0.85, blue: 0.85 },
+      },
+      // Source columns — light blue
+      {
+        startCol: dsSourceStart, endCol: dsSourceEnd,
+        color:       { red: 0.87, green: 0.92, blue: 1.0 },
+        headerColor: { red: 0.62, green: 0.77, blue: 0.91 },
+      },
+      // Total — light orange
+      {
+        startCol: dsTotalStart, endCol: dsTotalEnd,
+        color:       { red: 1.0,  green: 0.93, blue: 0.82 },
+        headerColor: { red: 0.96, green: 0.79, blue: 0.55 },
+      },
+    ]);
+
+    // Bold header and TOTAL row
+    await boldRow(sheets, spreadsheetId, 'Dealer Source Breakdown', 0);
+    await boldRow(sheets, spreadsheetId, 'Dealer Source Breakdown', dealerSheetRows.length - 1);
 
     const syncedAt = now.toISOString();
 
