@@ -69,24 +69,28 @@ module.exports = async (req, res) => {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
   try {
+    const t0 = Date.now();
     // ── 1. GHL field map ───────────────────────────────────────────────────
     const fieldMap = await fetchCustomFieldIdToKeyMap(locationId);
     const qualifiedDateFieldId = findFieldIdByKey(fieldMap, 'qualified_date');
     if (!qualifiedDateFieldId) throw new Error('Could not find custom field "qualified_date".');
+    console.log(`[TIMING] Field map: ${Date.now() - t0}ms`);
 
     // ── 2. Date range ──────────────────────────────────────────────────────
     const now        = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    // ── 3. Pull qualified leads day-by-day from GHL ───────────────────────
+    // ── 3. Pull qualified leads from GHL ─────────────────────────────────
     const contacts = await fetchQualifiedLeadsDayByDay(
       locationId, qualifiedDateFieldId, monthStart, now
     );
+    console.log(`[TIMING] GHL qualified leads (${contacts.length}): ${Date.now() - t0}ms`);
 
     // ── 4. Sheets client + Settings ───────────────────────────────────────
     const sheets = await getSheetsClient();
     await initSettingsTab(sheets, spreadsheetId, SEED_DEALERS);
     const settings = await readSettings(sheets, spreadsheetId);
+    console.log(`[TIMING] Sheets init: ${Date.now() - t0}ms`);
 
     if (!settings.dealers.length) {
       return res.status(200).json({ ok: false, message: 'No dealers found in Settings tab.' });
