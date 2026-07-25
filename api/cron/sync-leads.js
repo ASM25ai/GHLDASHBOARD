@@ -154,57 +154,58 @@ module.exports = async (req, res) => {
 
     const syncedAt = now.toISOString();
 
-    // ── 7. Fetch Hubstaff stats (non-blocking — graceful fallback if it fails)
-    // The personal access token is a refresh token — fetchHubstaffStats
-    // exchanges it for a short-lived access token before making API calls.
+    // ── 7. Fetch Hubstaff, call stats, Twilio in parallel ──────────────
     let hubToday = {};
     let hubMTD   = {};
     let hubError = null;
-
     let hubRawSample = null;
-    try {
-      const hubStats = await fetchHubstaffStats(now, monthStart);
-      hubToday     = hubStats.todayStats;
-      hubMTD       = hubStats.mtdStats;
-      hubRawSample = hubStats.rawSample; // for debugging activity % field
-    } catch (err) {
-      hubError = err.message;
-      console.warn('Hubstaff fetch failed (GHL sync will still complete):', err.message);
-    }
-
-    // ── 7b. Fetch GHL call counts per rep (non-blocking) ─────────────────
     let callStats = {};
     let callError = null;
     let callDebug = null;
-
-    try {
-      callStats = await fetchCallStats(REPS, locationId, now, monthStart);
-      callDebug  = callStats._debug || null;
-      delete callStats._debug;
-    } catch (err) {
-      callError = err.message;
-      console.warn('GHL call count fetch failed:', err.message);
-    }
-
-    // ── 7c. Fetch Twilio spend (non-blocking) ──────────────────────────────
     let twilioData = null;
     let twilioError = null;
 
-    try {
-      twilioData = await fetchTwilioSpend(now, monthStart);
-    } catch (err) {
-      twilioError = err.message;
-      console.warn('Twilio spend fetch failed:', err.message);
+    const [hubResult, callResult, twilioResult] = await Promise.allSettled([
+      fetchHubstaffStats(now, monthStart),
+      fetchCallStats(REPS, locationId, now, monthStart),
+      fetchTwilioSpend(now, monthStart),
+    ]);
+
+    if (hubResult.status === 'fulfilled') {
+      hubToday     = hubResult.value.todayStats;
+      hubMTD       = hubResult.value.mtdStats;
+      hubRawSample = hubResult.value.rawSample;
+    } else {
+      hubError = hubResult.reason?.message || 'Unknown error';
+      console.warn('Hubstaff fetch failed (GHL sync will still complete):', hubError);
     }
 
-    // ── 8. Ensure tabs exist ──────────────────────────────────────────────
+    if (callResult.status === 'fulfilled') {
+      callStats = callResult.value;
+      callDebug = callStats._debug || null;
+      delete callStats._debug;
+    } else {
+      callError = callResult.reason?.message || 'Unknown error';
+      console.warn('GHL call count fetch failed:', callError);
+    }
+
+    if (twilioResult.status === 'fulfilled') {
+      twilioData = twilioResult.value;
+    } else {
+      twilioError = twilioResult.reason?.message || 'Unknown error';
+      console.warn('Twilio spend fetch failed:', twilioError);
+    }
+
+    // ── 8. Ensure tabs exist (parallel) ───────────────────────────────────
     const monthTabName = `Qualified Leads - ${monthLabel(now)}`;
-    await ensureTab(sheets, spreadsheetId, monthTabName);
-    await ensureTab(sheets, spreadsheetId, 'Current Month Data');
-    await ensureTab(sheets, spreadsheetId, 'MTD Summary');
-    await ensureTab(sheets, spreadsheetId, 'Sales Rep');
-    await ensureTab(sheets, spreadsheetId, 'Daily Breakdown');
-    await ensureTab(sheets, spreadsheetId, 'Lead Type Breakdown');
+    await Promise.all([
+      ensureTab(sheets, spreadsheetId, monthTabName),
+      ensureTab(sheets, spreadsheetId, 'Current Month Data'),
+      ensureTab(sheets, spreadsheetId, 'MTD Summary'),
+      ensureTab(sheets, spreadsheetId, 'Sales Rep'),
+      ensureTab(sheets, spreadsheetId, 'Daily Breakdown'),
+      ensureTab(sheets, spreadsheetId, 'Lead Type Breakdown'),
+    ]);
 
     // ── 9. Raw data tabs ──────────────────────────────────────────────────
     const rawHeaders = [
