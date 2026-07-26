@@ -23,7 +23,7 @@ const {
   boldRow,
 } = require('../../lib/sheets');
 const { normalizeDealer } = require('../../lib/aliases');
-const { nowET, monthStartET, dateKey, parseDate } = require('../../lib/timezone');
+const { nowET, monthStartET, dateKey, parseDate, monthStartUTCms, nowUTCms } = require('../../lib/timezone');
 
 // ── Main handler ──────────────────────────────────────────────────────────────
 
@@ -44,10 +44,12 @@ module.exports = async (req, res) => {
     // ── 2. Date range (Eastern Time) ──────────────────────────────────────
     const now        = nowET();
     const monthStart = monthStartET();
+    const ghlStartMs = monthStartUTCms();
+    const ghlEndMs   = nowUTCms();
 
     // ── 3. Pull all new leads by created_date ──────────────────────────────
     const newLeadContacts = await fetchNewLeadsDayByDay(
-      locationId, createdDateFieldId, monthStart, now
+      locationId, createdDateFieldId, ghlStartMs, ghlEndMs
     );
 
     // ── 4. Sheets client ──────────────────────────────────────────────────

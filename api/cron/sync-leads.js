@@ -29,7 +29,7 @@ const { fetchCallStats } = require('../../lib/calls');
 const { fetchTwilioSpend } = require('../../lib/twilio');
 const SEED_DEALERS = require('../../lib/dealers');
 const REPS         = require('../../lib/reps');
-const { nowET, monthStartET, dateKey, monthLabel, parseDate, isSameDay } = require('../../lib/timezone');
+const { nowET, monthStartET, dateKey, monthLabel, parseDate, isSameDay, monthStartUTCms, nowUTCms } = require('../../lib/timezone');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -56,12 +56,16 @@ module.exports = async (req, res) => {
     console.log(`[TIMING] Field map: ${Date.now() - t0}ms`);
 
     // ── 2. Date range (Eastern Time) ──────────────────────────────────────
-    const now        = nowET();
-    const monthStart = monthStartET();
+    const now        = nowET();         // for display (dateKey, monthLabel)
+    const monthStart = monthStartET();  // for display
+
+    // UTC ms timestamps for GHL API queries
+    const ghlStartMs = monthStartUTCms();
+    const ghlEndMs   = nowUTCms();
 
     // ── 3. Pull qualified leads from GHL ─────────────────────────────────
     const contacts = await fetchQualifiedLeadsDayByDay(
-      locationId, qualifiedDateFieldId, monthStart, now
+      locationId, qualifiedDateFieldId, ghlStartMs, ghlEndMs
     );
     console.log(`[TIMING] GHL qualified leads (${contacts.length}): ${Date.now() - t0}ms`);
 
@@ -148,9 +152,16 @@ module.exports = async (req, res) => {
     let twilioData = null;
     let twilioError = null;
 
+    // Wrap call stats in a 30-second timeout — it's the slowest part
+    // and we can't let it consume the full 60-second budget
+    const callStatsWithTimeout = Promise.race([
+      fetchCallStats(REPS, locationId, now, monthStart),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Call stats timed out after 30s')), 30000)),
+    ]);
+
     const [hubResult, callResult, twilioResult] = await Promise.allSettled([
       fetchHubstaffStats(now, monthStart),
-      fetchCallStats(REPS, locationId, now, monthStart),
+      callStatsWithTimeout,
       fetchTwilioSpend(now, monthStart),
     ]);
 
