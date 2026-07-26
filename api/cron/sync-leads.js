@@ -29,30 +29,9 @@ const { fetchCallStats } = require('../../lib/calls');
 const { fetchTwilioSpend } = require('../../lib/twilio');
 const SEED_DEALERS = require('../../lib/dealers');
 const REPS         = require('../../lib/reps');
+const { nowET, monthStartET, dateKey, monthLabel, parseDate, isSameDay } = require('../../lib/timezone');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-function parseDate(value) {
-  if (!value) return null;
-  const d = new Date(value);
-  return isNaN(d.getTime()) ? null : d;
-}
-
-function isSameDay(a, b) {
-  return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth()    === b.getMonth()    &&
-    a.getDate()     === b.getDate()
-  );
-}
-
-function dateKey(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-function monthLabel(d) {
-  return d.toLocaleString('en-US', { month: 'long', year: 'numeric' });
-}
 
 function pct(delivered, target) {
   if (!target) return '-';
@@ -76,9 +55,9 @@ module.exports = async (req, res) => {
     if (!qualifiedDateFieldId) throw new Error('Could not find custom field "qualified_date".');
     console.log(`[TIMING] Field map: ${Date.now() - t0}ms`);
 
-    // ── 2. Date range ──────────────────────────────────────────────────────
-    const now        = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    // ── 2. Date range (Eastern Time) ──────────────────────────────────────
+    const now        = nowET();
+    const monthStart = monthStartET();
 
     // ── 3. Pull qualified leads from GHL ─────────────────────────────────
     const contacts = await fetchQualifiedLeadsDayByDay(

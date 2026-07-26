@@ -23,18 +23,7 @@ const {
   boldRow,
 } = require('../../lib/sheets');
 const { normalizeDealer } = require('../../lib/aliases');
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function parseDate(value) {
-  if (!value) return null;
-  const d = new Date(value);
-  return isNaN(d.getTime()) ? null : d;
-}
-
-function dateKey(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
+const { nowET, monthStartET, dateKey, parseDate } = require('../../lib/timezone');
 
 // ── Main handler ──────────────────────────────────────────────────────────────
 
@@ -52,9 +41,9 @@ module.exports = async (req, res) => {
     const createdDateFieldId = findFieldIdByKey(fieldMap, 'created_date');
     if (!createdDateFieldId) throw new Error('Could not find custom field "created_date".');
 
-    // ── 2. Date range ──────────────────────────────────────────────────────
-    const now        = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    // ── 2. Date range (Eastern Time) ──────────────────────────────────────
+    const now        = nowET();
+    const monthStart = monthStartET();
 
     // ── 3. Pull all new leads by created_date ──────────────────────────────
     const newLeadContacts = await fetchNewLeadsDayByDay(
