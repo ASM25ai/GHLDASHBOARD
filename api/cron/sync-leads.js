@@ -25,7 +25,7 @@ const {
   fmtHours,
   fmtActivity,
 } = require('../../lib/hubstaff');
-const { fetchCallStats } = require('../../lib/calls');
+// Call stats moved to api/cron/sync-calls.js
 const { fetchTwilioSpend } = require('../../lib/twilio');
 const SEED_DEALERS = require('../../lib/dealers');
 const REPS         = require('../../lib/reps');
@@ -141,7 +141,7 @@ module.exports = async (req, res) => {
 
     const syncedAt = now.toISOString();
 
-    // ── 7. Fetch Hubstaff, call stats, Twilio in parallel ──────────────
+    // ── 7. Fetch Hubstaff + Twilio in parallel (call stats moved to sync-calls)
     let hubToday = {};
     let hubMTD   = {};
     let hubError = null;
@@ -152,16 +152,8 @@ module.exports = async (req, res) => {
     let twilioData = null;
     let twilioError = null;
 
-    // Wrap call stats in a 30-second timeout — it's the slowest part
-    // and we can't let it consume the full 60-second budget
-    const callStatsWithTimeout = Promise.race([
-      fetchCallStats(REPS, locationId, now, monthStart),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Call stats timed out after 30s')), 30000)),
-    ]);
-
-    const [hubResult, callResult, twilioResult] = await Promise.allSettled([
+    const [hubResult, twilioResult] = await Promise.allSettled([
       fetchHubstaffStats(now, monthStart),
-      callStatsWithTimeout,
       fetchTwilioSpend(now, monthStart),
     ]);
 
@@ -171,16 +163,7 @@ module.exports = async (req, res) => {
       hubRawSample = hubResult.value.rawSample;
     } else {
       hubError = hubResult.reason?.message || 'Unknown error';
-      console.warn('Hubstaff fetch failed (GHL sync will still complete):', hubError);
-    }
-
-    if (callResult.status === 'fulfilled') {
-      callStats = callResult.value;
-      callDebug = callStats._debug || null;
-      delete callStats._debug;
-    } else {
-      callError = callResult.reason?.message || 'Unknown error';
-      console.warn('GHL call count fetch failed:', callError);
+      console.warn('Hubstaff fetch failed:', hubError);
     }
 
     if (twilioResult.status === 'fulfilled') {
