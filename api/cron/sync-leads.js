@@ -13,7 +13,6 @@ const {
   readSettings,
   initSettingsTab,
   initDealerViewTab,
-  applyMTDRowGroups,
 } = require('../../lib/sheets');
 const {
   normalizeDealer,
@@ -198,44 +197,173 @@ module.exports = async (req, res) => {
     await clearAndWrite(sheets, spreadsheetId, monthTabName,         [rawHeaders, ...rawDataRows]);
     await clearAndWrite(sheets, spreadsheetId, 'Current Month Data', [rawHeaders, ...rawDataRows]);
 
-    // ── 10. MTD Summary (dealer rows + collapsible FM sub-rows) ───────────
-    let rowIdx = 1;
-    const fmGroups  = [];
-    let totalOrder  = 0, totalToday = 0, totalMtd = 0;
+    // ── 10. MTD Summary ─────────────────────────────────────────────────
+    let totalOrder = 0, totalToday = 0, totalMtd = 0;
+    //
+    // Three dealer types rendered in distinct sections:
+    //   A) FM breakdown (e.g. Absolute Approval) — per-FM rows with Refunds
+    //   B) Grouped branches (e.g. South Trail Kia) — sub-dealers under a parent
+    //   C) Simple dealers — order + delivery (Leduc) or delivery-only (REV)
+    //
+    // Layout: consistent columns across all sections:
+    //   Name | Order | Delivered | Refunds | After Refunds | Remaining | % Complete
+    //
+    // Dealers with FM rows in Settings → type A
+    // Dealers with a Group value in Settings → type B (grouped under parent)
+    // Everything else → type C
 
-    const summaryRows = [
-      ['Dealer / FM', 'Order / Target', "Today's Qualified", 'MTD Delivered', 'Remaining', '% Complete', 'Last Synced'],
-    ];
+    const summaryRows = [];
+    let grandOrder = 0, grandDelivered = 0, grandRefunds = 0;
+
+    // ---- Categorize dealers ----
+    const fmDealers    = [];  // type A: has FM rows
+    const groupedMap   = {};  // type B: group name → [dealer, ...]
+    const simpleDealers = []; // type C: everything else
 
     for (const dealer of settings.dealers) {
-      const order = settings.orders[dealer] || 0;
-      const stats = dealerStats[dealer] || { today: 0, mtd: 0, fms: {} };
-      totalOrder += order; totalToday += stats.today; totalMtd += stats.mtd;
+      const hasFMs   = (settings.fms[dealer] || []).length > 0;
+      const groupName = settings.groups[dealer];
 
-      summaryRows.push([dealer, order, stats.today, stats.mtd, Math.max(0, order - stats.mtd), pct(stats.mtd, order), syncedAt]);
-      rowIdx++;
-
-      const fmStartIdx = rowIdx;
-
-      for (const fmDef of (settings.fms[dealer] || [])) {
-        const s = stats.fms[fmDef.name] || { today: 0, mtd: 0 };
-        summaryRows.push([`  → ${fmDef.name}`, fmDef.target, s.today, s.mtd, Math.max(0, fmDef.target - s.mtd), pct(s.mtd, fmDef.target), '']);
-        rowIdx++;
+      if (hasFMs) {
+        fmDealers.push(dealer);
+      } else if (groupName) {
+        if (!groupedMap[groupName]) groupedMap[groupName] = [];
+        groupedMap[groupName].push(dealer);
+      } else {
+        simpleDealers.push(dealer);
       }
-
-      const unassigned = stats.fms['Unassigned'] || { today: 0, mtd: 0 };
-      if (unassigned.mtd > 0) {
-        summaryRows.push([`  → Unassigned`, '-', unassigned.today, unassigned.mtd, '-', '-', '']);
-        rowIdx++;
-      }
-
-      if (rowIdx > fmStartIdx) fmGroups.push({ startIndex: fmStartIdx, endIndex: rowIdx });
     }
 
-    summaryRows.push(['TOTAL', totalOrder, totalToday, totalMtd, Math.max(0, totalOrder - totalMtd), pct(totalMtd, totalOrder), syncedAt]);
+    // ---- Helper: add a section header row ----
+    function sectionHeader(title) {
+      summaryRows.push([]);
+      summaryRows.push([`═══ ${title} ═══`, 'Order', 'Delivered', 'Refunds', 'After Refunds', 'Remaining', '% Complete']);
+    }
+
+    // ---- Type A: FM breakdown dealers (e.g. Absolute Approval) ----
+    for (const dealer of fmDealers) {
+      sectionHeader(dealer);
+      const fmList = settings.fms[dealer] || [];
+      const stats  = dealerStats[dealer] || { today: 0, mtd: 0, fms: {} };
+
+      let dealerOrder = 0, dealerDelivered = 0, dealerRefunds = 0;
+
+      for (const fmDef of fmList) {
+        const s = stats.fms[fmDef.name] || { today: 0, mtd: 0 };
+        const ref     = settings.refunds[`${dealer}::${fmDef.name}`] || 0;
+        const afterRef = s.mtd - ref;
+        const remain   = fmDef.target - afterRef;
+
+        dealerOrder     += fmDef.target;
+        dealerDelivered += s.mtd;
+        dealerRefunds   += ref;
+
+        const status = remain < 0 ? 'over delivered' : '';
+        summaryRows.push([
+          fmDef.name, fmDef.target, s.mtd, ref, afterRef,
+          remain < 0 ? remain : Math.max(0, remain),
+          pct(afterRef, fmDef.target),
+          status,
+        ]);
+      }
+
+      // Unassigned FM row (if any leads have no FM match)
+      const unassigned = stats.fms['Unassigned'] || { today: 0, mtd: 0 };
+      if (unassigned.mtd > 0) {
+        dealerDelivered += unassigned.mtd;
+        summaryRows.push(['Unassigned', '-', unassigned.mtd, '-', unassigned.mtd, '-', '-']);
+      }
+
+      const totalAfterRef = dealerDelivered - dealerRefunds;
+      const totalRemain   = dealerOrder - totalAfterRef;
+      summaryRows.push([
+        `TOTAL ${dealer}`, dealerOrder, dealerDelivered, dealerRefunds, totalAfterRef,
+        totalRemain < 0 ? totalRemain : Math.max(0, totalRemain),
+        pct(totalAfterRef, dealerOrder),
+        totalRemain < 0 ? 'over delivered' : '',
+      ]);
+
+      grandOrder     += dealerOrder;
+      grandDelivered += dealerDelivered;
+      grandRefunds   += dealerRefunds;
+    }
+
+    // ---- Type B: Grouped branch dealers (e.g. South Trail Kia) ----
+    for (const [groupName, members] of Object.entries(groupedMap)) {
+      sectionHeader(groupName);
+      let groupOrder = 0, groupDelivered = 0;
+
+      for (const dealer of members) {
+        const order = settings.orders[dealer] || 0;
+        const stats = dealerStats[dealer] || { today: 0, mtd: 0 };
+        const remain = order - stats.mtd;
+
+        groupOrder     += order;
+        groupDelivered += stats.mtd;
+
+        summaryRows.push([
+          dealer, order, stats.mtd, '', '', 
+          remain < 0 ? remain : Math.max(0, remain),
+          pct(stats.mtd, order),
+        ]);
+      }
+
+      const groupRemain = groupOrder - groupDelivered;
+      summaryRows.push([
+        `TOTAL ${groupName}`, groupOrder, groupDelivered, '', '',
+        groupRemain < 0 ? groupRemain : Math.max(0, groupRemain),
+        pct(groupDelivered, groupOrder),
+      ]);
+
+      grandOrder     += groupOrder;
+      grandDelivered += groupDelivered;
+    }
+
+    // ---- Type C: Simple dealers ----
+    for (const dealer of simpleDealers) {
+      const order = settings.orders[dealer] || 0;
+      const stats = dealerStats[dealer] || { today: 0, mtd: 0 };
+      const ref   = settings.refunds[dealer] || 0;
+
+      if (order === 0) {
+        // Delivery-only dealer (e.g. REV) — minimal row
+        sectionHeader(dealer);
+        summaryRows.push([dealer, '-', stats.mtd, '', '', '-', '-']);
+        grandDelivered += stats.mtd;
+      } else {
+        // Standard order + delivery dealer (e.g. Leduc)
+        sectionHeader(dealer);
+        const afterRef = stats.mtd - ref;
+        const remain   = order - afterRef;
+        summaryRows.push([
+          dealer, order, stats.mtd, ref || '', ref ? afterRef : '',
+          remain < 0 ? remain : Math.max(0, remain),
+          pct(ref ? afterRef : stats.mtd, order),
+        ]);
+        grandOrder   += order;
+        grandDelivered += stats.mtd;
+        grandRefunds += ref;
+      }
+    }
+
+    // ---- Grand Total ----
+    const grandAfterRef = grandDelivered - grandRefunds;
+    const grandRemain   = grandOrder - grandAfterRef;
+    summaryRows.push([]);
+    summaryRows.push([
+      'GRAND TOTAL', grandOrder, grandDelivered, grandRefunds, grandAfterRef,
+      grandRemain < 0 ? grandRemain : Math.max(0, grandRemain),
+      pct(grandAfterRef, grandOrder),
+    ]);
+    summaryRows.push([]);
+    summaryRows.push([`Last synced: ${syncedAt}`]);
+
+    // Track totals for the API response
+    totalOrder = grandOrder;
+    totalToday = Object.values(dealerStats).reduce((s, d) => s + d.today, 0);
+    totalMtd   = grandDelivered;
 
     await clearAndWrite(sheets, spreadsheetId, 'MTD Summary', summaryRows);
-    await applyMTDRowGroups(sheets, spreadsheetId, fmGroups);
 
     // ── 11. Sales Rep tab (leads + Hubstaff hours, two sections) ─────────
     const repNames = Object.keys(REPS);
