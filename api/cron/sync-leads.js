@@ -140,6 +140,72 @@ module.exports = async (req, res) => {
 
     const syncedAt = now.toISOString();
 
+    // ── 6b. Overlay sub-account stats ──────────────────────────────────
+    //
+    // If DEALER_SUBACCOUNTS is configured, fetch delivered counts from each
+    // dealer's own GHL sub-account and REPLACE the main-account stats for
+    // that dealer. This gives accurate per-FM delivered counts from the
+    // dealer's own CRM.
+
+    let subAccountResults = {};
+    try {
+      const { aggregateDealerStats, loadSubAccountConfigs } = require('../../lib/ghl-subaccounts');
+      const subConfigs = loadSubAccountConfigs();
+
+      for (const config of subConfigs) {
+        try {
+          const saStats = await aggregateDealerStats(config);
+          subAccountResults[config.name] = saStats;
+
+          // Override dealerStats for this dealer with sub-account data
+          if (dealerStats[config.name]) {
+            // Reset the main-account counts
+            dealerStats[config.name].mtd   = saStats.thisMonth.total;
+            dealerStats[config.name].today = 0; // sub-account doesn't track "today" separately
+
+            // Override FM counts
+            for (const fm of Object.keys(dealerStats[config.name].fms)) {
+              dealerStats[config.name].fms[fm] = { today: 0, mtd: 0 };
+            }
+
+            // Fill in FM counts from sub-account Owner field
+            for (const [ownerName, count] of Object.entries(saStats.thisMonth.byFM)) {
+              // Try to match owner name to FM name in settings
+              const fmList = settings.fms[config.name] || [];
+              let matched = false;
+              for (const fmDef of fmList) {
+                if (
+                  ownerName === fmDef.name ||
+                  ownerName.toLowerCase().includes(fmDef.name.toLowerCase()) ||
+                  fmDef.name.toLowerCase().includes(ownerName.toLowerCase().split(' ')[0])
+                ) {
+                  if (!dealerStats[config.name].fms[fmDef.name]) {
+                    dealerStats[config.name].fms[fmDef.name] = { today: 0, mtd: 0 };
+                  }
+                  dealerStats[config.name].fms[fmDef.name].mtd += count;
+                  matched = true;
+                  break;
+                }
+              }
+              if (!matched) {
+                // Put under the owner name directly (may show as unmapped)
+                if (!dealerStats[config.name].fms[ownerName]) {
+                  dealerStats[config.name].fms[ownerName] = { today: 0, mtd: 0 };
+                }
+                dealerStats[config.name].fms[ownerName].mtd += count;
+              }
+            }
+
+            console.log(`  ✓ Overlaid ${config.name} stats: ${saStats.thisMonth.total} delivered this month`);
+          }
+        } catch (err) {
+          console.error(`  ✗ Sub-account ${config.name} failed:`, err.message);
+        }
+      }
+    } catch (err) {
+      console.warn('Sub-account module not available or failed:', err.message);
+    }
+
     // ── 7. Fetch Hubstaff + Twilio in parallel (call stats moved to sync-calls)
     let hubToday = {};
     let hubMTD   = {};
@@ -252,19 +318,36 @@ module.exports = async (req, res) => {
         const s = stats.fms[fmDef.name] || { today: 0, mtd: 0 };
         const ref     = settings.refunds[`${dealer}::${fmDef.name}`] || 0;
         const afterRef = s.mtd - ref;
-        const remain   = fmDef.target - afterRef;
+        const remain   = fmDef.target > 0 ? fmDef.target - afterRef : 0;
 
         dealerOrder     += fmDef.target;
         dealerDelivered += s.mtd;
         dealerRefunds   += ref;
 
-        const status = remain < 0 ? 'over delivered' : '';
-        summaryRows.push([
-          fmDef.name, fmDef.target, s.mtd, ref, afterRef,
-          remain < 0 ? remain : Math.max(0, remain),
-          pct(afterRef, fmDef.target),
-          status,
-        ]);
+        if (fmDef.target > 0) {
+          const status = remain < 0 ? 'over delivered' : '';
+          summaryRows.push([
+            fmDef.name, fmDef.target, s.mtd, ref, afterRef,
+            remain < 0 ? remain : Math.max(0, remain),
+            pct(afterRef, fmDef.target),
+            status,
+          ]);
+        } else {
+          // FM with no target — just show delivered count
+          summaryRows.push([
+            fmDef.name, '-', s.mtd, ref || '', ref ? afterRef : s.mtd, '-', '-',
+          ]);
+        }
+      }
+
+      // Check for FMs from sub-account that aren't in Settings
+      for (const [fmName, fmStat] of Object.entries(stats.fms)) {
+        if (fmName === 'Unassigned') continue;
+        const inSettings = fmList.some((f) => f.name === fmName);
+        if (!inSettings && fmStat.mtd > 0) {
+          dealerDelivered += fmStat.mtd;
+          summaryRows.push([`⚠ ${fmName} (unmapped)`, '-', fmStat.mtd, '-', fmStat.mtd, '-', '-']);
+        }
       }
 
       // Unassigned FM row (if any leads have no FM match)
