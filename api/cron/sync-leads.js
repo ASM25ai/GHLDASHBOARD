@@ -12,7 +12,7 @@ const {
   clearAndWrite,
   readSettings,
   initSettingsTab,
-  initDealerViewTab,
+  formatMTDSummary,
 } = require('../../lib/sheets');
 const {
   normalizeDealer,
@@ -364,6 +364,7 @@ module.exports = async (req, res) => {
     totalMtd   = grandDelivered;
 
     await clearAndWrite(sheets, spreadsheetId, 'MTD Summary', summaryRows);
+    await formatMTDSummary(sheets, spreadsheetId, summaryRows);
 
     // ── 11. Sales Rep tab (leads + Hubstaff hours, two sections) ─────────
     const repNames = Object.keys(REPS);
@@ -597,9 +598,6 @@ module.exports = async (req, res) => {
       }),
       ['TOTAL', ...ltColumnTotals, ltColumnTotals.reduce((a, b) => a + b, 0)],
     ]);
-
-    // ── 14. Dealer View tab (created once) ────────────────────────────────
-    await initDealerViewTab(sheets, spreadsheetId);
 
     // ── Done ──────────────────────────────────────────────────────────────
     return res.status(200).json({
