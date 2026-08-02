@@ -45,7 +45,7 @@ module.exports = async (req, res) => {
     }
 
     const sheets        = await getSheetsClient();
-    const spreadsheetId = process.env.GOOGLE_SHEETS_ID;
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
     const settings      = await readSettings(sheets, spreadsheetId);
 
     const now      = new Date();
