@@ -3,14 +3,9 @@
 //
 // Pulls delivered-lead counts from each dealer's GHL sub-account and writes
 // two tabs:
-//   "Dealer Stats - Monthly"  — this month, by FM, with order/remaining
-//   "Dealer Stats - All Time" — lifetime delivered counts by FM
-//
-// Runs on a schedule (e.g. every 30 min via GitHub Actions / Vercel cron).
-//
-// Env vars required:
-//   DEALER_SUBACCOUNTS — JSON array of sub-account configs (see lib/ghl-subaccounts.js)
-//   GOOGLE_SHEETS_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY
+//   "Dealer Stats - All Time"  — full report: Order, Delivered, Refunds,
+//                                 After Refunds, Remaining, % Complete (per FM)
+//   "Dealer Stats - Monthly"   — simple: FM name + this month's delivered count
 // ---------------------------------------------------------------------------
 
 const {
@@ -26,15 +21,23 @@ const {
   loadSubAccountConfigs,
 } = require('../../lib/ghl-subaccounts');
 
-const SEED_DEALERS = require('../../lib/dealers');
-
 function pct(delivered, target) {
   if (!target) return '-';
   return `${Math.round((delivered / target) * 100)}%`;
 }
 
-function dateKey(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+// Match a GHL Owner name to a Settings FM name (flexible partial matching)
+function matchFM(ownerName, fmList) {
+  for (const fmDef of fmList) {
+    if (
+      ownerName === fmDef.name ||
+      ownerName.toLowerCase().includes(fmDef.name.toLowerCase()) ||
+      fmDef.name.toLowerCase().includes(ownerName.toLowerCase().split(' ')[0])
+    ) {
+      return fmDef;
+    }
+  }
+  return null;
 }
 
 module.exports = async (req, res) => {
@@ -63,7 +66,135 @@ module.exports = async (req, res) => {
       }
     }
 
-    // ── Build "Dealer Stats - Monthly" tab ─────────────────────────────
+    // ════════════════════════════════════════════════════════════════════
+    // Dealer Stats - All Time (FULL REPORT)
+    // Order | Delivered | Refunds | After Refunds | Remaining | % Complete
+    // ════════════════════════════════════════════════════════════════════
+
+    const allTimeRows = [];
+    let atGrandOrder = 0, atGrandDelivered = 0, atGrandRefunds = 0;
+
+    for (const { config, stats, error } of dealerResults) {
+      if (error || !stats) {
+        allTimeRows.push([]);
+        allTimeRows.push([`═══ ${config.name} ═══`, 'ERROR', error || 'Unknown error']);
+        continue;
+      }
+
+      const dealerName = stats.dealerName;
+      const fmList     = settings.fms[dealerName] || [];
+
+      allTimeRows.push([]);
+      allTimeRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'Refunds', 'After Refunds', 'Remaining', '% Complete']);
+
+      if (fmList.length > 0) {
+        let dOrder = 0, dDelivered = 0, dRefunds = 0;
+
+        for (const fmDef of fmList) {
+          // Sum all-time delivered for this FM from sub-account
+          let delivered = 0;
+          for (const [ownerName, count] of Object.entries(stats.allTime.byFM)) {
+            if (matchFM(ownerName, [fmDef])) {
+              delivered += count;
+            }
+          }
+
+          const ref      = settings.refunds[`${dealerName}::${fmDef.name}`] || 0;
+          const afterRef = delivered - ref;
+          const remain   = fmDef.target > 0 ? fmDef.target - afterRef : 0;
+
+          dOrder     += fmDef.target;
+          dDelivered += delivered;
+          dRefunds   += ref;
+
+          if (fmDef.target > 0) {
+            allTimeRows.push([
+              fmDef.name, fmDef.target, delivered, ref, afterRef,
+              remain < 0 ? remain : Math.max(0, remain),
+              pct(afterRef, fmDef.target),
+              remain < 0 ? 'over delivered' : '',
+            ]);
+          } else {
+            allTimeRows.push([
+              fmDef.name, '-', delivered, ref || '', ref ? afterRef : delivered, '-', '-',
+            ]);
+          }
+        }
+
+        // Unmapped FMs from sub-account
+        for (const [ownerName, count] of Object.entries(stats.allTime.byFM)) {
+          if (ownerName === 'Unassigned') continue;
+          if (!matchFM(ownerName, fmList)) {
+            dDelivered += count;
+            allTimeRows.push([`⚠ ${ownerName} (unmapped)`, '-', count, '-', count, '-', '-']);
+          }
+        }
+
+        // Unassigned
+        const unassigned = stats.allTime.byFM['Unassigned'] || 0;
+        if (unassigned > 0) {
+          dDelivered += unassigned;
+          allTimeRows.push(['Unassigned', '-', unassigned, '-', unassigned, '-', '-']);
+        }
+
+        // Total
+        const totalAfterRef = dDelivered - dRefunds;
+        const totalRemain   = dOrder - totalAfterRef;
+        allTimeRows.push([
+          `TOTAL ${dealerName}`, dOrder, dDelivered, dRefunds, totalAfterRef,
+          totalRemain < 0 ? totalRemain : Math.max(0, totalRemain),
+          pct(totalAfterRef, dOrder),
+          totalRemain < 0 ? 'over delivered' : '',
+        ]);
+
+        atGrandOrder     += dOrder;
+        atGrandDelivered += dDelivered;
+        atGrandRefunds   += dRefunds;
+      } else {
+        // Simple dealer
+        const order     = settings.orders[dealerName] || 0;
+        const delivered = stats.allTime.total;
+        const ref       = settings.refunds[dealerName] || 0;
+        const afterRef  = delivered - ref;
+        const remain    = order - afterRef;
+
+        allTimeRows.push([
+          dealerName,
+          order || '-',
+          delivered,
+          ref || '',
+          ref ? afterRef : '',
+          order ? (remain < 0 ? remain : Math.max(0, remain)) : '-',
+          order ? pct(ref ? afterRef : delivered, order) : '-',
+        ]);
+
+        atGrandOrder     += order;
+        atGrandDelivered += delivered;
+        atGrandRefunds   += ref;
+      }
+    }
+
+    // Grand total
+    const atGrandAfterRef = atGrandDelivered - atGrandRefunds;
+    const atGrandRemain   = atGrandOrder - atGrandAfterRef;
+    allTimeRows.push([]);
+    allTimeRows.push([
+      'GRAND TOTAL', atGrandOrder, atGrandDelivered, atGrandRefunds, atGrandAfterRef,
+      atGrandRemain < 0 ? atGrandRemain : Math.max(0, atGrandRemain),
+      pct(atGrandAfterRef, atGrandOrder),
+    ]);
+    allTimeRows.push([]);
+    allTimeRows.push([`Last synced: ${syncedAt}`]);
+
+    await ensureTab(sheets, spreadsheetId, 'Dealer Stats - All Time');
+    await clearAndWrite(sheets, spreadsheetId, 'Dealer Stats - All Time', allTimeRows);
+    await formatMTDSummary(sheets, spreadsheetId, allTimeRows);
+
+    // ════════════════════════════════════════════════════════════════════
+    // Dealer Stats - Monthly (SIMPLE VIEW)
+    // Just FM name + this month's delivered count
+    // ════════════════════════════════════════════════════════════════════
+
     const monthlyRows = [];
 
     for (const { config, stats, error } of dealerResults) {
@@ -75,159 +206,51 @@ module.exports = async (req, res) => {
 
       const dealerName = stats.dealerName;
       const fmList     = settings.fms[dealerName] || [];
-      const hasFMs     = fmList.length > 0;
 
       monthlyRows.push([]);
-      monthlyRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'Refunds', 'After Refunds', 'Remaining', '% Complete']);
+      monthlyRows.push([`═══ ${dealerName} ═══`, 'This Month Delivered']);
 
-      if (hasFMs) {
-        // FM breakdown — match FM names from Settings to Owner names from GHL
-        let dealerOrder = 0, dealerDelivered = 0, dealerRefunds = 0;
+      if (fmList.length > 0) {
+        let dealerTotal = 0;
 
         for (const fmDef of fmList) {
-          // Find the GHL Owner name that matches this FM
-          // Try exact match first, then partial match
           let delivered = 0;
           for (const [ownerName, count] of Object.entries(stats.thisMonth.byFM)) {
-            if (
-              ownerName === fmDef.name ||
-              ownerName.toLowerCase().includes(fmDef.name.toLowerCase()) ||
-              fmDef.name.toLowerCase().includes(ownerName.toLowerCase().split(' ')[0])
-            ) {
+            if (matchFM(ownerName, [fmDef])) {
               delivered += count;
             }
           }
-
-          const ref      = settings.refunds[`${dealerName}::${fmDef.name}`] || 0;
-          const afterRef = delivered - ref;
-          const remain   = fmDef.target - afterRef;
-
-          dealerOrder     += fmDef.target;
-          dealerDelivered += delivered;
-          dealerRefunds   += ref;
-
-          monthlyRows.push([
-            fmDef.name, fmDef.target, delivered, ref, afterRef,
-            remain < 0 ? remain : Math.max(0, remain),
-            pct(afterRef, fmDef.target),
-            remain < 0 ? 'over delivered' : '',
-          ]);
+          dealerTotal += delivered;
+          monthlyRows.push([fmDef.name, delivered]);
         }
 
-        // Check for unmatched FM leads
-        const matchedFMs = new Set(fmList.map((f) => f.name.toLowerCase()));
+        // Unmapped
         for (const [ownerName, count] of Object.entries(stats.thisMonth.byFM)) {
-          const isMatched = fmList.some((f) =>
-            ownerName === f.name ||
-            ownerName.toLowerCase().includes(f.name.toLowerCase()) ||
-            f.name.toLowerCase().includes(ownerName.toLowerCase().split(' ')[0])
-          );
-          if (!isMatched && ownerName !== 'Unassigned') {
-            dealerDelivered += count;
-            monthlyRows.push([`⚠ ${ownerName} (unmapped)`, '-', count, '-', count, '-', '-']);
+          if (ownerName === 'Unassigned') continue;
+          if (!matchFM(ownerName, fmList)) {
+            dealerTotal += count;
+            monthlyRows.push([`⚠ ${ownerName} (unmapped)`, count]);
           }
         }
 
         // Unassigned
         const unassigned = stats.thisMonth.byFM['Unassigned'] || 0;
         if (unassigned > 0) {
-          dealerDelivered += unassigned;
-          monthlyRows.push(['Unassigned', '-', unassigned, '-', unassigned, '-', '-']);
+          dealerTotal += unassigned;
+          monthlyRows.push(['Unassigned', unassigned]);
         }
 
-        // Total row
-        const totalAfterRef = dealerDelivered - dealerRefunds;
-        const totalRemain   = dealerOrder - totalAfterRef;
-        monthlyRows.push([
-          `TOTAL ${dealerName}`, dealerOrder, dealerDelivered, dealerRefunds, totalAfterRef,
-          totalRemain < 0 ? totalRemain : Math.max(0, totalRemain),
-          pct(totalAfterRef, dealerOrder),
-          totalRemain < 0 ? 'over delivered' : '',
-        ]);
+        monthlyRows.push([`TOTAL ${dealerName}`, dealerTotal]);
       } else {
-        // Simple dealer — just total counts
-        const order     = settings.orders[dealerName] || 0;
-        const delivered = stats.thisMonth.total;
-        const ref       = settings.refunds[dealerName] || 0;
-
-        if (order === 0) {
-          // Delivery-only
-          monthlyRows.push([dealerName, '-', delivered, '', '', '-', '-']);
-        } else {
-          const afterRef = delivered - ref;
-          const remain   = order - afterRef;
-          monthlyRows.push([
-            dealerName, order, delivered, ref || '', ref ? afterRef : '',
-            remain < 0 ? remain : Math.max(0, remain),
-            pct(ref ? afterRef : delivered, order),
-          ]);
-        }
+        monthlyRows.push([dealerName, stats.thisMonth.total]);
       }
     }
 
-    // Grand total
-    let grandOrder = 0, grandDelivered = 0, grandRefunds = 0;
-    for (const { stats } of dealerResults) {
-      if (!stats) continue;
-      const dn = stats.dealerName;
-      const fmList = settings.fms[dn] || [];
-      if (fmList.length > 0) {
-        grandOrder += fmList.reduce((s, f) => s + f.target, 0);
-      } else {
-        grandOrder += settings.orders[dn] || 0;
-      }
-      grandDelivered += stats.thisMonth.total;
-      // Sum refunds
-      for (const fmDef of fmList) {
-        grandRefunds += settings.refunds[`${dn}::${fmDef.name}`] || 0;
-      }
-      if (!fmList.length) grandRefunds += settings.refunds[dn] || 0;
-    }
-    const grandAfterRef = grandDelivered - grandRefunds;
-    const grandRemain   = grandOrder - grandAfterRef;
-
-    monthlyRows.push([]);
-    monthlyRows.push([
-      'GRAND TOTAL', grandOrder, grandDelivered, grandRefunds, grandAfterRef,
-      grandRemain < 0 ? grandRemain : Math.max(0, grandRemain),
-      pct(grandAfterRef, grandOrder),
-    ]);
     monthlyRows.push([]);
     monthlyRows.push([`Last synced: ${syncedAt}`]);
 
     await ensureTab(sheets, spreadsheetId, 'Dealer Stats - Monthly');
     await clearAndWrite(sheets, spreadsheetId, 'Dealer Stats - Monthly', monthlyRows);
-    await formatMTDSummary(sheets, spreadsheetId, monthlyRows);
-
-    // ── Build "Dealer Stats - All Time" tab ────────────────────────────
-    const allTimeRows = [];
-
-    for (const { config, stats, error } of dealerResults) {
-      if (error || !stats) {
-        allTimeRows.push([]);
-        allTimeRows.push([`═══ ${config.name} ═══`, 'ERROR', error || 'Unknown error']);
-        continue;
-      }
-
-      allTimeRows.push([]);
-      allTimeRows.push([`═══ ${stats.dealerName} ═══`, 'All-Time Delivered']);
-
-      // Sort by count descending
-      const sorted = Object.entries(stats.allTime.byFM)
-        .sort((a, b) => b[1] - a[1]);
-
-      for (const [fmName, count] of sorted) {
-        allTimeRows.push([fmName, count]);
-      }
-
-      allTimeRows.push([`TOTAL ${stats.dealerName}`, stats.allTime.total]);
-    }
-
-    allTimeRows.push([]);
-    allTimeRows.push([`Last synced: ${syncedAt}`]);
-
-    await ensureTab(sheets, spreadsheetId, 'Dealer Stats - All Time');
-    await clearAndWrite(sheets, spreadsheetId, 'Dealer Stats - All Time', allTimeRows);
 
     // ── Response ───────────────────────────────────────────────────────
     return res.status(200).json({
