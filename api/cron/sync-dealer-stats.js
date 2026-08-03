@@ -83,11 +83,37 @@ module.exports = async (req, res) => {
 
       const dealerName = stats.dealerName;
       const fmList     = settings.fms[dealerName] || [];
+      const hasSplit   = stats.allTime.split !== null;
 
       allTimeRows.push([]);
-      allTimeRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'Refunds', 'After Refunds', 'Remaining', '% Complete']);
 
-      if (fmList.length > 0) {
+      if (hasSplit) {
+        // ── Split-field dealer (e.g. Leduc: Paid vs Free) ──────────────
+        const order     = settings.orders[dealerName] || 0;
+        const delivered = stats.allTime.total;
+        const paid      = stats.allTime.split.paid;
+        const free      = stats.allTime.split.free;
+        const thisMonth = stats.thisMonth.total;
+        const remain    = order > 0 ? order - paid : 0;
+
+        allTimeRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'Paid', 'Free', 'This Month', 'Remaining', '% Complete']);
+        allTimeRows.push([
+          dealerName, order || '-', delivered, paid, free, thisMonth,
+          order > 0 ? (remain < 0 ? remain : Math.max(0, remain)) : '-',
+          order > 0 ? pct(paid, order) : '-',
+        ]);
+        allTimeRows.push([
+          `TOTAL ${dealerName}`, order || '-', delivered, paid, free, thisMonth,
+          order > 0 ? (remain < 0 ? remain : Math.max(0, remain)) : '-',
+          order > 0 ? pct(paid, order) : '-',
+        ]);
+
+        atGrandOrder     += order;
+        atGrandDelivered += delivered;
+
+      } else if (fmList.length > 0) {
+        // ── FM breakdown dealer (e.g. Absolute Approval) ───────────────
+        allTimeRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'Refunds', 'After Refunds', 'Remaining', '% Complete']);
         let dOrder = 0, dDelivered = 0, dRefunds = 0;
 
         for (const fmDef of fmList) {
@@ -209,11 +235,20 @@ module.exports = async (req, res) => {
 
       const dealerName = stats.dealerName;
       const fmList     = settings.fms[dealerName] || [];
+      const hasSplit   = stats.thisMonth.split !== null;
 
       monthlyRows.push([]);
-      monthlyRows.push([`═══ ${dealerName} ═══`, 'This Month Delivered']);
 
-      if (fmList.length > 0) {
+      if (hasSplit) {
+        // Split dealer (Leduc) — show this month's paid/free
+        const thisMonth = stats.thisMonth.total;
+        const paid      = stats.thisMonth.split.paid;
+        const free      = stats.thisMonth.split.free;
+        monthlyRows.push([`═══ ${dealerName} ═══`, 'This Month Delivered', 'Paid', 'Free']);
+        monthlyRows.push([dealerName, thisMonth, paid, free]);
+        monthlyRows.push([`TOTAL ${dealerName}`, thisMonth, paid, free]);
+      } else if (fmList.length > 0) {
+        monthlyRows.push([`═══ ${dealerName} ═══`, 'This Month Delivered']);
         let dealerTotal = 0;
 
         for (const fmDef of fmList) {
@@ -245,6 +280,7 @@ module.exports = async (req, res) => {
 
         monthlyRows.push([`TOTAL ${dealerName}`, dealerTotal]);
       } else {
+        monthlyRows.push([`═══ ${dealerName} ═══`, 'This Month Delivered']);
         monthlyRows.push([dealerName, stats.thisMonth.total]);
       }
     }
