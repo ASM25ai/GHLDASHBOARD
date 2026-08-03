@@ -316,7 +316,16 @@ module.exports = async (req, res) => {
 
       for (const fmDef of fmList) {
         const s = stats.fms[fmDef.name] || { today: 0, mtd: 0 };
-        const ref     = settings.refunds[`${dealer}::${fmDef.name}`] || 0;
+
+        // Use sub-account refunds if available, otherwise fall back to Settings
+        let ref = 0;
+        const saData = subAccountResults[dealer];
+        if (saData && saData.thisMonth && saData.thisMonth.refundsByFM) {
+          ref = saData.thisMonth.refundsByFM[fmDef.name] || 0;
+        } else {
+          ref = settings.refunds[`${dealer}::${fmDef.name}`] || 0;
+        }
+
         const afterRef = s.mtd - ref;
         const remain   = fmDef.target > 0 ? fmDef.target - afterRef : 0;
 

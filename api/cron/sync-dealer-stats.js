@@ -93,13 +93,14 @@ module.exports = async (req, res) => {
         for (const fmDef of fmList) {
           // Sum all-time delivered for this FM from sub-account
           let delivered = 0;
+          let ref = 0;
           for (const [ownerName, count] of Object.entries(stats.allTime.byFM)) {
             if (matchFM(ownerName, [fmDef])) {
               delivered += count;
+              ref += stats.allTime.refundsByFM[ownerName] || 0;
             }
           }
 
-          const ref      = settings.refunds[`${dealerName}::${fmDef.name}`] || 0;
           const afterRef = delivered - ref;
           const remain   = fmDef.target > 0 ? fmDef.target - afterRef : 0;
 
@@ -125,8 +126,10 @@ module.exports = async (req, res) => {
         for (const [ownerName, count] of Object.entries(stats.allTime.byFM)) {
           if (ownerName === 'Unassigned') continue;
           if (!matchFM(ownerName, fmList)) {
+            const unmappedRef = stats.allTime.refundsByFM[ownerName] || 0;
             dDelivered += count;
-            allTimeRows.push([`⚠ ${ownerName} (unmapped)`, '-', count, '-', count, '-', '-']);
+            dRefunds   += unmappedRef;
+            allTimeRows.push([`⚠ ${ownerName} (unmapped)`, '-', count, unmappedRef, count - unmappedRef, '-', '-']);
           }
         }
 
@@ -154,7 +157,7 @@ module.exports = async (req, res) => {
         // Simple dealer
         const order     = settings.orders[dealerName] || 0;
         const delivered = stats.allTime.total;
-        const ref       = settings.refunds[dealerName] || 0;
+        const ref       = stats.allTime.totalRefunds || 0;
         const afterRef  = delivered - ref;
         const remain    = order - afterRef;
 
