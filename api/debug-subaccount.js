@@ -1,6 +1,5 @@
-// Debug endpoint — shows raw contact tag data from a sub-account
-// Hit: /api/debug-subaccount?secret=...
-// Returns sample contacts with their tags so we can see why FM matching fails
+// Debug endpoint — shows raw contact data from a sub-account
+// Hit: /api/debug-subaccount?secret=...&dealer=0 (index in DEALER_SUBACCOUNTS)
 
 const { loadSubAccountConfigs, searchContactsByTag } = require('../lib/ghl-subaccounts');
 
@@ -11,15 +10,15 @@ module.exports = async (req, res) => {
       return res.status(200).json({ error: 'No DEALER_SUBACCOUNTS configured' });
     }
 
-    const config = configs[0]; // Just check the first sub-account
+    const idx = parseInt(req.query.dealer || '0', 10);
+    const config = configs[idx] || configs[0];
     const { locationId, apiKey, deliveredTag = 'qualified', fmTagMap = {} } = config;
 
-    // Fetch first page of qualified contacts
     const GHL_BASE = 'https://services.leadconnectorhq.com';
     const body = {
       locationId,
       page: 1,
-      pageLimit: 5, // Just 5 contacts for debugging
+      pageLimit: 5,
       filters: [
         { field: 'tags', operator: 'contains', value: deliveredTag },
       ],
@@ -38,26 +37,25 @@ module.exports = async (req, res) => {
     const data = await response.json();
     const contacts = data.contacts || [];
 
-    // Show raw tag data for each contact
     const samples = contacts.map((c) => ({
       name: `${c.firstName || ''} ${c.lastName || ''}`.trim(),
       tags: c.tags,
       assignedTo: c.assignedTo,
       dateCreated: c.dateCreated,
       dateAdded: c.dateAdded,
+      customFields: c.customFields,
     }));
 
-    // Show all unique tags across these contacts
     const allTags = new Set();
     for (const c of contacts) {
-      for (const t of (c.tags || [])) {
-        allTags.add(t);
-      }
+      for (const t of (c.tags || [])) allTags.add(t);
     }
 
     return res.status(200).json({
       dealer: config.name,
+      locationId: config.locationId,
       fmTagMapFromEnv: fmTagMap,
+      splitFieldFromEnv: config.splitField || null,
       totalContacts: data.total || contacts.length,
       sampleContacts: samples,
       uniqueTagsInSample: [...allTags].sort(),
