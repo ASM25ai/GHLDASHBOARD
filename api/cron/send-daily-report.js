@@ -150,13 +150,18 @@ module.exports = async (req, res) => {
           }
           const afterRef = delivered - ref;
           const remain   = fmDef.target > 0 ? fmDef.target - afterRef : 0;
+          const isFulfilled = remain <= 0;
+
+          const deliveredColor = isFulfilled ? 'color: #2196F3;' : '';
+          const remainColor    = isFulfilled ? 'color: #2196F3;' : 'color: #E53935;';
+          const remainDisplay  = remain < 0 ? remain : Math.max(0, remain);
 
           html += `
             <tr>
               <td ${tdStyle}>${fmDef.name}</td>
               <td ${tdNumStyle}>${fmDef.target || '-'}</td>
-              <td ${tdNumStyle}>${delivered}</td>
-              <td ${tdNumStyle}>${remain < 0 ? remain : Math.max(0, remain)}</td>
+              <td style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; font-weight: bold; ${deliveredColor}">${delivered}</td>
+              <td style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; font-weight: bold; ${remainColor}">${remainDisplay}</td>
               <td ${tdNumStyle}>${ref}</td>
             </tr>
           `;
