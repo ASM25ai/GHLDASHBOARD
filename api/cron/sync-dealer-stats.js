@@ -96,14 +96,9 @@ module.exports = async (req, res) => {
         const thisMonth = stats.thisMonth.total;
         const remain    = order > 0 ? order - paid : 0;
 
-        allTimeRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'Paid', 'Free', 'This Month', 'Remaining', '% Complete']);
+        allTimeRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'This Month', 'Paid', 'Free', 'Remaining', '% Complete']);
         allTimeRows.push([
-          dealerName, order || '-', delivered, paid, free, thisMonth,
-          order > 0 ? (remain < 0 ? remain : Math.max(0, remain)) : '-',
-          order > 0 ? pct(paid, order) : '-',
-        ]);
-        allTimeRows.push([
-          `TOTAL ${dealerName}`, order || '-', delivered, paid, free, thisMonth,
+          dealerName, order || '-', delivered, thisMonth, paid, free,
           order > 0 ? (remain < 0 ? remain : Math.max(0, remain)) : '-',
           order > 0 ? pct(paid, order) : '-',
         ]);
@@ -112,12 +107,11 @@ module.exports = async (req, res) => {
         atGrandDelivered += delivered;
 
       } else if (fmList.length > 0) {
-        // ── FM breakdown dealer (e.g. Absolute Approval) ───────────────
-        allTimeRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'Refunds', 'After Refunds', 'Remaining', '% Complete']);
+        // ── FM breakdown dealer (e.g. Absolute Approval, Eastside Kia) ─
+        allTimeRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'Remaining', 'Refunds', 'After Refunds', '% Complete']);
         let dOrder = 0, dDelivered = 0, dRefunds = 0;
 
         for (const fmDef of fmList) {
-          // Sum all-time delivered for this FM from sub-account
           let delivered = 0;
           let ref = 0;
           for (const [ownerName, count] of Object.entries(stats.allTime.byFM)) {
@@ -136,14 +130,15 @@ module.exports = async (req, res) => {
 
           if (fmDef.target > 0) {
             allTimeRows.push([
-              fmDef.name, fmDef.target, delivered, ref, afterRef,
+              fmDef.name, fmDef.target, delivered,
               remain < 0 ? remain : Math.max(0, remain),
+              ref, afterRef,
               pct(afterRef, fmDef.target),
               remain < 0 ? 'over delivered' : '',
             ]);
           } else {
             allTimeRows.push([
-              fmDef.name, '-', delivered, ref || '', ref ? afterRef : delivered, '-', '-',
+              fmDef.name, '-', delivered, '-', ref || '', ref ? afterRef : delivered, '-',
             ]);
           }
         }
@@ -155,7 +150,7 @@ module.exports = async (req, res) => {
             const unmappedRef = stats.allTime.refundsByFM[ownerName] || 0;
             dDelivered += count;
             dRefunds   += unmappedRef;
-            allTimeRows.push([`⚠ ${ownerName} (unmapped)`, '-', count, unmappedRef, count - unmappedRef, '-', '-']);
+            allTimeRows.push([`⚠ ${ownerName} (unmapped)`, '-', count, '-', unmappedRef, count - unmappedRef, '-']);
           }
         }
 
@@ -163,18 +158,8 @@ module.exports = async (req, res) => {
         const unassigned = stats.allTime.byFM['Unassigned'] || 0;
         if (unassigned > 0) {
           dDelivered += unassigned;
-          allTimeRows.push(['Unassigned', '-', unassigned, '-', unassigned, '-', '-']);
+          allTimeRows.push(['Unassigned', '-', unassigned, '-', '-', unassigned, '-']);
         }
-
-        // Total
-        const totalAfterRef = dDelivered - dRefunds;
-        const totalRemain   = dOrder - totalAfterRef;
-        allTimeRows.push([
-          `TOTAL ${dealerName}`, dOrder, dDelivered, dRefunds, totalAfterRef,
-          totalRemain < 0 ? totalRemain : Math.max(0, totalRemain),
-          pct(totalAfterRef, dOrder),
-          totalRemain < 0 ? 'over delivered' : '',
-        ]);
 
         atGrandOrder     += dOrder;
         atGrandDelivered += dDelivered;
@@ -187,13 +172,11 @@ module.exports = async (req, res) => {
         const afterRef  = delivered - ref;
         const remain    = order - afterRef;
 
+        allTimeRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'Remaining', 'Refunds', 'After Refunds', '% Complete']);
         allTimeRows.push([
-          dealerName,
-          order || '-',
-          delivered,
-          ref || '',
-          ref ? afterRef : '',
+          dealerName, order || '-', delivered,
           order ? (remain < 0 ? remain : Math.max(0, remain)) : '-',
+          ref || '', ref ? afterRef : '',
           order ? pct(ref ? afterRef : delivered, order) : '-',
         ]);
 
@@ -208,8 +191,9 @@ module.exports = async (req, res) => {
     const atGrandRemain   = atGrandOrder - atGrandAfterRef;
     allTimeRows.push([]);
     allTimeRows.push([
-      'GRAND TOTAL', atGrandOrder, atGrandDelivered, atGrandRefunds, atGrandAfterRef,
+      'GRAND TOTAL', atGrandOrder, atGrandDelivered,
       atGrandRemain < 0 ? atGrandRemain : Math.max(0, atGrandRemain),
+      atGrandRefunds, atGrandAfterRef,
       pct(atGrandAfterRef, atGrandOrder),
     ]);
     allTimeRows.push([]);
