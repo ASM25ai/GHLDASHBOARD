@@ -3,6 +3,7 @@
     "api/cron/sync-leads.js": { "maxDuration": 60 },
     "api/cron/sync-daily-leads.js": { "maxDuration": 60 },
     "api/cron/sync-calls.js": { "maxDuration": 60 },
-    "api/cron/sync-dealer-stats.js": { "maxDuration": 60 }
+    "api/cron/sync-dealer-stats.js": { "maxDuration": 60 },
+    "api/cron/send-daily-report.js": { "maxDuration": 60 }
   }
 }
