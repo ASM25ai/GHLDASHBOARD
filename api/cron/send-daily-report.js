@@ -268,7 +268,7 @@ module.exports = async (req, res) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: 'GHL Dashboard <onboarding@resend.dev>',
+        from: 'GHL Dashboard <reports@adscalesmedia.com>',
         to: [emailTo],
         subject: `Daily Report — ${date}`,
         html,
