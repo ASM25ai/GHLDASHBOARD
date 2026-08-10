@@ -167,10 +167,98 @@ module.exports = async (req, res) => {
     }
 
     html += `
-        <br>
-        <p style="color: #999; font-size: 12px;">GHL Dashboard</p>
       </div>
     `;
+
+    // ── Read Sales Rep data from Google Sheet ─────────────────────────
+    // The "Sales Rep" tab is populated by sync-leads every 30 min.
+    // We read the TODAY section to get: Rep Name, Leads, Calls, >30s, Avg Dur, SMS, Hours
+    try {
+      const repRes = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: 'Sales Rep!A1:M20',
+      });
+      const repRows = repRes.data.values || [];
+
+      // Find the TODAY section (starts with "TODAY —")
+      let todayStart = -1;
+      for (let i = 0; i < repRows.length; i++) {
+        if (repRows[i][0] && repRows[i][0].startsWith('TODAY')) {
+          todayStart = i;
+          break;
+        }
+      }
+
+      if (todayStart >= 0 && repRows.length > todayStart + 2) {
+        // Header is todayStart+1, data starts at todayStart+2
+        const dataRows = [];
+        for (let i = todayStart + 2; i < repRows.length; i++) {
+          const row = repRows[i];
+          if (!row || !row[0] || row[0] === 'TOTAL') break;
+          // Columns: 0=Name, 1=Leads, 2=Calls, 3=>30s, 4=AvgDur, 5=SMS, 6=Hours
+          const name    = row[0] || '';
+          const leads   = row[1] || '0';
+          const calls   = row[2] || '0';
+          const gt30s   = row[3] || '0';
+          const sms     = row[5] || '0';
+          const hours   = row[6] || '0.0 hr';
+
+          // Extract just the first name from "Jess (Jess Arrojo)"
+          const shortName = name.split('(')[0].trim() || name;
+
+          // Check if hours is 0
+          const isZeroHours = hours === '0.0 hr' || hours === '0 hr' || hours === '-';
+
+          dataRows.push({ shortName, leads, calls, sms, hours, gt30s, isZeroHours });
+        }
+
+        if (dataRows.length > 0) {
+          const thS = 'style="text-align: right; padding: 8px 12px; border-bottom: 2px solid #333; font-weight: bold; background: #f5f5f5;"';
+          const thL = 'style="text-align: left; padding: 8px 12px; border-bottom: 2px solid #333; font-weight: bold; background: #f5f5f5;"';
+          const tdR = 'style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd;"';
+          const tdL = 'style="text-align: left; padding: 6px 12px; border-bottom: 1px solid #ddd;"';
+          const tdRGray = 'style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; color: #999;"';
+          const tdLGray = 'style="text-align: left; padding: 6px 12px; border-bottom: 1px solid #ddd; color: #999;"';
+
+          // Insert before closing </div>
+          html = html.replace('</div>', `
+            <p style="font-size: 16px; font-weight: bold; padding: 16px 0 8px 0; border-bottom: 2px solid #333;">═══ Sales Rep — Today ═══</p>
+            <table style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: Arial, sans-serif; font-size: 14px;">
+              <tr>
+                <th ${thL}>Sales Rep</th>
+                <th ${thS}>Qualified</th>
+                <th ${thS}>Calls</th>
+                <th ${thS}>SMS</th>
+                <th ${thS}>Hours</th>
+                <th ${thS}>&gt;30s</th>
+              </tr>
+              ${dataRows.map((r) => {
+                if (r.isZeroHours) {
+                  return `<tr>
+                    <td ${tdLGray}>${r.shortName}</td>
+                    <td ${tdRGray}></td>
+                    <td ${tdRGray}></td>
+                    <td ${tdRGray}></td>
+                    <td ${tdRGray}>0.0 hr</td>
+                    <td ${tdRGray}></td>
+                  </tr>`;
+                }
+                return `<tr>
+                  <td ${tdL}>${r.shortName}</td>
+                  <td ${tdR}>${r.leads}</td>
+                  <td ${tdR}>${r.calls}</td>
+                  <td ${tdR}>${r.sms}</td>
+                  <td ${tdR}>${r.hours}</td>
+                  <td ${tdR}>${r.gt30s}</td>
+                </tr>`;
+              }).join('')}
+            </table>
+          </div>`);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to read Sales Rep tab:', err.message);
+    }
 
     // ── Send email via Resend ──────────────────────────────────────────
     const emailRes = await fetch('https://api.resend.com/emails', {
@@ -180,7 +268,7 @@ module.exports = async (req, res) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: 'GHL Dashboard <reports@adscalesmedia.com>',
+        from: 'GHL Dashboard <onboarding@resend.dev>',
         to: [emailTo],
         subject: `Daily Report — ${date}`,
         html,
