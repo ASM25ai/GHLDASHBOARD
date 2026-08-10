@@ -175,29 +175,43 @@ module.exports = async (req, res) => {
       </div>
     `;
 
-    // ── Read Sales Rep data from Google Sheet ─────────────────────────
-    // The "Sales Rep" tab is populated by sync-leads every 30 min.
-    // We read the TODAY section to get: Rep Name, Leads, Calls, >30s, Avg Dur, SMS, Hours
+    // ── Read Sales Rep YESTERDAY data from Google Sheet ─────────────────
+    // The "Sales Rep" tab now has a YESTERDAY section preserved by sync-leads
+    // when the date rolls over. We read that for the daily email.
     try {
       const repRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
-        range: 'Sales Rep!A1:M20',
+        range: 'Sales Rep!A1:M40',
       });
       const repRows = repRes.data.values || [];
 
-      // Find the TODAY section (starts with "TODAY —")
-      let todayStart = -1;
+      // Find the YESTERDAY section first, fall back to TODAY
+      let sectionStart = -1;
+      let sectionLabel = 'Yesterday';
       for (let i = 0; i < repRows.length; i++) {
-        if (repRows[i][0] && repRows[i][0].startsWith('TODAY')) {
-          todayStart = i;
+        if (repRows[i][0] && repRows[i][0].startsWith('YESTERDAY')) {
+          sectionStart = i;
+          // Extract date from "YESTERDAY — 2026-08-09"
+          const yestDate = repRows[i][0].replace('YESTERDAY — ', '');
+          sectionLabel = `Yesterday (${yestDate})`;
           break;
         }
       }
+      // Fall back to TODAY if no YESTERDAY section
+      if (sectionStart < 0) {
+        for (let i = 0; i < repRows.length; i++) {
+          if (repRows[i][0] && repRows[i][0].startsWith('TODAY')) {
+            sectionStart = i;
+            sectionLabel = 'Today';
+            break;
+          }
+        }
+      }
 
-      if (todayStart >= 0 && repRows.length > todayStart + 2) {
-        // Header is todayStart+1, data starts at todayStart+2
+      if (sectionStart >= 0 && repRows.length > sectionStart + 2) {
+        // Header is sectionStart+1, data starts at sectionStart+2
         const dataRows = [];
-        for (let i = todayStart + 2; i < repRows.length; i++) {
+        for (let i = sectionStart + 2; i < repRows.length; i++) {
           const row = repRows[i];
           if (!row || !row[0] || row[0] === 'TOTAL') break;
           // Columns: 0=Name, 1=Leads, 2=Calls, 3=>30s, 4=AvgDur, 5=SMS, 6=Hours
@@ -227,7 +241,7 @@ module.exports = async (req, res) => {
 
           // Insert before closing </div>
           html = html.replace('</div>', `
-            <p style="font-size: 16px; font-weight: bold; padding: 16px 0 8px 0; border-bottom: 2px solid #333;">═══ Sales Rep — Today ═══</p>
+            <p style="font-size: 16px; font-weight: bold; padding: 16px 0 8px 0; border-bottom: 2px solid #333;">═══ Sales Rep — ${sectionLabel} ═══</p>
             <table style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: Arial, sans-serif; font-size: 14px;">
               <tr>
                 <th ${thL}>Sales Rep</th>

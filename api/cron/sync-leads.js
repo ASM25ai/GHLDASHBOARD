@@ -627,8 +627,69 @@ module.exports = async (req, res) => {
       salesMTDRows.push([`⚠ GHL call count failed: ${callError}. Calls show - until resolved.`]);
     }
 
+    // ── Preserve YESTERDAY data before overwriting ──────────────────────
+    // Read the current Sales Rep tab. If the TODAY section has a different date,
+    // save those rows as YESTERDAY so the daily email can reference them.
+    let yesterdayRows = [];
+    try {
+      const curRepRes = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: 'Sales Rep!A1:M30',
+      });
+      const curRows = curRepRes.data.values || [];
+
+      // Find current TODAY section
+      let curTodayIdx = -1;
+      let curTodayDate = '';
+      for (let i = 0; i < curRows.length; i++) {
+        if (curRows[i][0] && curRows[i][0].startsWith('TODAY')) {
+          curTodayIdx = i;
+          curTodayDate = curRows[i][0]; // e.g. "TODAY — 2026-08-09"
+          break;
+        }
+      }
+
+      // Check if existing YESTERDAY section exists
+      let curYestIdx = -1;
+      for (let i = 0; i < curRows.length; i++) {
+        if (curRows[i][0] && curRows[i][0].startsWith('YESTERDAY')) {
+          curYestIdx = i;
+          break;
+        }
+      }
+
+      const todayDateStr = dateKey(now);
+      const existingDateStr = curTodayDate.replace('TODAY — ', '');
+
+      if (curTodayIdx >= 0 && existingDateStr && existingDateStr !== todayDateStr) {
+        // Date changed — save current TODAY as YESTERDAY
+        const yestLabel = `YESTERDAY — ${existingDateStr}`;
+        yesterdayRows.push([]);
+        yesterdayRows.push([yestLabel]);
+        // Copy header + data rows from old TODAY section
+        for (let i = curTodayIdx + 1; i < curRows.length; i++) {
+          const row = curRows[i];
+          if (!row || !row[0]) break;
+          if (row[0].startsWith('MTD') || row[0].startsWith('YESTERDAY')) break;
+          yesterdayRows.push(row);
+        }
+        console.log(`  Preserved yesterday's data (${existingDateStr})`);
+      } else if (curYestIdx >= 0) {
+        // Same date — keep existing YESTERDAY section
+        for (let i = curYestIdx; i < curRows.length; i++) {
+          const row = curRows[i];
+          if (!row || !row[0]) { yesterdayRows.push([]); break; }
+          if (row[0].startsWith('MTD')) break;
+          yesterdayRows.push(row);
+        }
+      }
+    } catch (err) {
+      console.warn('Could not read existing Sales Rep tab:', err.message);
+    }
+
     await clearAndWrite(sheets, spreadsheetId, 'Sales Rep', [
       ...salesTodayRows,
+      ...yesterdayRows,
       ...salesMTDRows,
       [],
       [`Last synced: ${syncedAt}`],
