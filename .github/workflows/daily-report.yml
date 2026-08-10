@@ -1,0 +1,21 @@
+name: Daily Email Report
+
+on:
+  schedule:
+    - cron: '0 16 * * *'   # 4 PM UTC = 11 AM EST (12 PM EDT)
+  workflow_dispatch: {}
+
+jobs:
+  send-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync dealer stats first
+        continue-on-error: true
+        run: |
+          curl -sS -f \
+            "${{ secrets.VERCEL_DEALER_STATS_URL }}?secret=${{ secrets.CRON_SECRET }}"
+
+      - name: Send daily report email
+        run: |
+          curl -sS -f \
+            "${{ secrets.VERCEL_DAILY_REPORT_URL }}?secret=${{ secrets.CRON_SECRET }}"

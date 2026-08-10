@@ -26,3 +26,9 @@ jobs:
         run: |
           curl -sS -f \
             "${{ secrets.VERCEL_CALLS_URL }}?secret=${{ secrets.CRON_SECRET }}"
+
+      - name: Sync dealer stats (sub-accounts)
+        continue-on-error: true
+        run: |
+          curl -sS -f \
+            "${{ secrets.VERCEL_DEALER_STATS_URL }}?secret=${{ secrets.CRON_SECRET }}"
