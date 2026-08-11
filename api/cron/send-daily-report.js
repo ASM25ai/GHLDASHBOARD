@@ -175,108 +175,171 @@ module.exports = async (req, res) => {
       </div>
     `;
 
-    // ── Read Sales Rep YESTERDAY data from Google Sheet ─────────────────
-    // The "Sales Rep" tab now has a YESTERDAY section preserved by sync-leads
-    // when the date rolls over. We read that for the daily email.
+    // ── Qualified Yesterday — per-rep per-dealer breakdown ─────────────
+    // Read from "Current Month Data" tab, filter for yesterday's qualified leads,
+    // group by Sales Rep × Dealer. For Leduc, split Paid/Free from sub-account.
     try {
-      const repRes = await sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: 'Sales Rep!A1:M40',
-      });
-      const repRows = repRes.data.values || [];
+      const now_est = new Date(now.toLocaleString('en-US', { timeZone: 'America/Toronto' }));
+      const yesterday = new Date(now_est);
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yestDateStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
 
-      // Find the YESTERDAY section first, fall back to TODAY
-      let sectionStart = -1;
-      let sectionLabel = 'Yesterday';
-      for (let i = 0; i < repRows.length; i++) {
-        if (repRows[i][0] && repRows[i][0].startsWith('YESTERDAY')) {
-          sectionStart = i;
-          // Extract date from "YESTERDAY — 2026-08-09"
-          const yestDate = repRows[i][0].replace('YESTERDAY — ', '');
-          sectionLabel = `Yesterday (${yestDate})`;
-          break;
-        }
-      }
-      // Fall back to TODAY if no YESTERDAY section
-      if (sectionStart < 0) {
-        for (let i = 0; i < repRows.length; i++) {
-          if (repRows[i][0] && repRows[i][0].startsWith('TODAY')) {
-            sectionStart = i;
-            sectionLabel = 'Today';
-            break;
+      // Read the Current Month Data tab
+      const cmdRes = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: 'Current Month Data!A1:L2000',
+      });
+      const cmdRows = cmdRes.data.values || [];
+      // Header: Contact ID, Qualified Date, Dealer, FM, Sales Rep, ...
+      // Row:    id,         2026-08-10,     ...,    ..., Jess, ...
+
+      // Get all dealer names from the sub-account configs for column headers
+      const dealerNames = configs.map((c) => c.name);
+
+      // Find which config is the split dealer (Leduc)
+      const splitConfig = configs.find((c) => c.splitField || c.splitFieldId);
+      const splitDealerName = splitConfig ? splitConfig.name : null;
+
+      // Build a set of yesterday's Leduc contact IDs that are "Paid" from sub-account
+      const paidContactIds = new Set();
+      if (splitConfig && splitDealerName) {
+        // Find the stats we already fetched for the split dealer
+        const splitResult = dealerResults.find((d) => d.config.name === splitDealerName);
+        if (splitResult && splitResult.stats) {
+          // We need to re-check individual contacts for yesterday — fetch from sub-account
+          const { searchContactsByTag, loadSubAccountConfigs } = require('../../lib/ghl-subaccounts');
+          try {
+            const GHL_BASE = 'https://services.leadconnectorhq.com';
+            const yestStart = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate());
+            const yestEnd   = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 23, 59, 59, 999);
+
+            const body = {
+              locationId: splitConfig.locationId,
+              page: 1,
+              pageLimit: 100,
+              filters: [
+                { field: 'tags', operator: 'contains', value: splitConfig.deliveredTag || 'qualified' },
+              ],
+            };
+
+            const response = await fetch(`${GHL_BASE}/contacts/search`, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${splitConfig.apiKey}`,
+                Version: '2021-07-28',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(body),
+            });
+            const data = await response.json();
+            const contacts = data.contacts || [];
+
+            for (const c of contacts) {
+              const created = new Date(c.dateCreated || c.dateAdded);
+              if (created >= yestStart && created <= yestEnd) {
+                // Check if paid
+                const fields = c.customFields || [];
+                for (const f of fields) {
+                  if (splitConfig.splitFieldId && f.id === splitConfig.splitFieldId) {
+                    if (f.value && f.value.toLowerCase().includes('paid')) {
+                      // Match this contact by phone or email to the Current Month Data
+                      if (c.phone) paidContactIds.add(c.phone.replace(/\D/g, '').slice(-10));
+                      if (c.email) paidContactIds.add(c.email.toLowerCase().trim());
+                    }
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            console.warn('Failed to fetch Leduc paid contacts:', err.message);
           }
         }
       }
 
-      if (sectionStart >= 0 && repRows.length > sectionStart + 2) {
-        // Header is sectionStart+1, data starts at sectionStart+2
-        const dataRows = [];
-        for (let i = sectionStart + 2; i < repRows.length; i++) {
-          const row = repRows[i];
-          if (!row || !row[0] || row[0] === 'TOTAL') break;
-          // Columns: 0=Name, 1=Leads, 2=Calls, 3=>30s, 4=AvgDur, 5=SMS, 6=Hours
-          const name    = row[0] || '';
-          const leads   = row[1] || '0';
-          const calls   = row[2] || '0';
-          const gt30s   = row[3] || '0';
-          const sms     = row[5] || '0';
-          const hours   = row[6] || '0.0 hr';
+      // Group yesterday's leads by Sales Rep × Dealer
+      // repStats: { 'Jess': { 'Absolute Approval': count, 'Leduc (Paid)': count, ... } }
+      const repStats = {};
+      const repNames = ['Jess', 'Marsha', 'Jan', 'Rea'];
+      for (const rn of repNames) repStats[rn] = {};
 
-          // Extract just the first name from "Jess (Jess Arrojo)"
-          const shortName = name.split('(')[0].trim() || name;
+      for (let i = 1; i < cmdRows.length; i++) {
+        const row = cmdRows[i];
+        if (!row || !row[1]) continue;
+        const qDate    = row[1]; // Qualified Date
+        const dealer   = row[2] || '';
+        const salesRep = (row[4] || '').trim();
+        const phone    = (row[9] || '').replace(/\D/g, '').slice(-10);
+        const email    = (row[10] || '').toLowerCase().trim();
 
-          // Check if hours is 0
-          const isZeroHours = hours === '0.0 hr' || hours === '0 hr' || hours === '-';
+        if (qDate !== yestDateStr) continue;
+        if (!salesRep) continue;
 
-          dataRows.push({ shortName, leads, calls, sms, hours, gt30s, isZeroHours });
-        }
+        // Match rep name
+        const repKey = repNames.find((r) => salesRep.toLowerCase().includes(r.toLowerCase()));
+        if (!repKey) continue;
 
-        if (dataRows.length > 0) {
-          const thS = 'style="text-align: right; padding: 8px 12px; border-bottom: 2px solid #333; font-weight: bold; background: #f5f5f5;"';
-          const thL = 'style="text-align: left; padding: 8px 12px; border-bottom: 2px solid #333; font-weight: bold; background: #f5f5f5;"';
-          const tdR = 'style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd;"';
-          const tdL = 'style="text-align: left; padding: 6px 12px; border-bottom: 1px solid #ddd;"';
-          const tdRGray = 'style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; color: #999;"';
-          const tdLGray = 'style="text-align: left; padding: 6px 12px; border-bottom: 1px solid #ddd; color: #999;"';
+        // Determine dealer column
+        let dealerCol = dealer;
+        // Normalize to dealer names we know
+        const matchedDealer = dealerNames.find((dn) => dealer.toLowerCase().includes(dn.toLowerCase()) || dn.toLowerCase().includes(dealer.toLowerCase()));
+        if (matchedDealer) dealerCol = matchedDealer;
 
-          // Insert before closing </div>
-          html = html.replace('</div>', `
-            <p style="font-size: 16px; font-weight: bold; padding: 16px 0 8px 0; border-bottom: 2px solid #333;">═══ Sales Rep — ${sectionLabel} ═══</p>
-            <table style="border-collapse: collapse; width: 100%; max-width: 600px; font-family: Arial, sans-serif; font-size: 14px;">
-              <tr>
-                <th ${thL}>Sales Rep</th>
-                <th ${thS}>Qualified</th>
-                <th ${thS}>Calls</th>
-                <th ${thS}>SMS</th>
-                <th ${thS}>Hours</th>
-                <th ${thS}>&gt;30s</th>
-              </tr>
-              ${dataRows.map((r) => {
-                if (r.isZeroHours) {
-                  return `<tr>
-                    <td ${tdLGray}>${r.shortName}</td>
-                    <td ${tdRGray}></td>
-                    <td ${tdRGray}></td>
-                    <td ${tdRGray}></td>
-                    <td ${tdRGray}>0.0 hr</td>
-                    <td ${tdRGray}></td>
-                  </tr>`;
-                }
-                return `<tr>
-                  <td ${tdL}>${r.shortName}</td>
-                  <td ${tdR}>${r.leads}</td>
-                  <td ${tdR}>${r.calls}</td>
-                  <td ${tdR}>${r.sms}</td>
-                  <td ${tdR}>${r.hours}</td>
-                  <td ${tdR}>${r.gt30s}</td>
-                </tr>`;
-              }).join('')}
-            </table>
-          </div>`);
+        // For the split dealer (Leduc), check paid/free
+        if (dealerCol === splitDealerName) {
+          const isPaid = paidContactIds.has(phone) || paidContactIds.has(email);
+          const key = isPaid ? `${splitDealerName} (Paid)` : `${splitDealerName} (Free)`;
+          repStats[repKey][key] = (repStats[repKey][key] || 0) + 1;
+        } else {
+          repStats[repKey][dealerCol] = (repStats[repKey][dealerCol] || 0) + 1;
         }
       }
+
+      // Build column headers from all dealers that appear
+      const columns = [];
+      for (const dn of dealerNames) {
+        if (dn === splitDealerName) {
+          columns.push(`${dn} (Paid)`);
+          columns.push(`${dn} (Free)`);
+        } else {
+          columns.push(dn);
+        }
+      }
+
+      // Check if any data exists
+      const hasData = repNames.some((rn) => Object.keys(repStats[rn]).length > 0);
+
+      if (hasData) {
+        const thS = 'style="text-align: right; padding: 8px 12px; border-bottom: 2px solid #333; font-weight: bold; background: #f5f5f5;"';
+        const thL = 'style="text-align: left; padding: 8px 12px; border-bottom: 2px solid #333; font-weight: bold; background: #f5f5f5;"';
+        const tdR = 'style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd;"';
+        const tdL = 'style="text-align: left; padding: 6px 12px; border-bottom: 1px solid #ddd;"';
+        const tdRGray = 'style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; color: #999;"';
+        const tdLGray = 'style="text-align: left; padding: 6px 12px; border-bottom: 1px solid #ddd; color: #999;"';
+
+        html = html.replace('</div>', `
+          <p style="font-size: 16px; font-weight: bold; padding: 16px 0 8px 0; border-bottom: 2px solid #333;">═══ Qualified Yesterday (${yestDateStr}) ═══</p>
+          <table style="border-collapse: collapse; width: 100%; max-width: 650px; font-family: Arial, sans-serif; font-size: 14px;">
+            <tr>
+              <th ${thL}>Sales Rep</th>
+              ${columns.map((c) => `<th ${thS}>${c}</th>`).join('')}
+              <th ${thS}>Total</th>
+            </tr>
+            ${repNames.map((rn) => {
+              const total = Object.values(repStats[rn]).reduce((s, v) => s + v, 0);
+              const isZero = total === 0;
+              const tl = isZero ? tdLGray : tdL;
+              const tr = isZero ? tdRGray : tdR;
+              return `<tr>
+                <td ${tl}>${rn}</td>
+                ${columns.map((c) => `<td ${tr}>${repStats[rn][c] || (isZero ? '' : '')}</td>`).join('')}
+                <td style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; font-weight: bold; ${isZero ? 'color: #999;' : ''}">${total || (isZero ? '0' : '0')}</td>
+              </tr>`;
+            }).join('')}
+          </table>
+        </div>`);
+      }
     } catch (err) {
-      console.warn('Failed to read Sales Rep tab:', err.message);
+      console.warn('Failed to build Qualified Yesterday section:', err.message);
     }
 
     // ── Send email via Resend ──────────────────────────────────────────
