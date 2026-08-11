@@ -190,74 +190,75 @@ module.exports = async (req, res) => {
         range: 'Current Month Data!A1:L2000',
       });
       const cmdRows = cmdRes.data.values || [];
-      // Header: Contact ID, Qualified Date, Dealer, FM, Sales Rep, ...
-      // Row:    id,         2026-08-10,     ...,    ..., Jess, ...
 
-      // Get all dealer names from the sub-account configs for column headers
-      const dealerNames = configs.map((c) => c.name);
+      // Use Settings aliasMap for dealer normalization
+      const aliasMap = settings.aliasMap || {};
 
-      // Find which config is the split dealer (Leduc)
+      // Fixed column list — all active dealers
       const splitConfig = configs.find((c) => c.splitField || c.splitFieldId);
       const splitDealerName = splitConfig ? splitConfig.name : null;
+
+      // Columns in order: AA, Leduc (Paid), Leduc (Free), Eastside Kia, REV
+      const columns = [];
+      const allDealers = ['Absolute Approval', 'Leduc', 'Eastside Kia', 'REV'];
+      for (const dn of allDealers) {
+        if (dn === splitDealerName) {
+          columns.push(`${dn} (Paid)`);
+          columns.push(`${dn} (Free)`);
+        } else {
+          columns.push(dn);
+        }
+      }
 
       // Build a set of yesterday's Leduc contact IDs that are "Paid" from sub-account
       const paidContactIds = new Set();
       if (splitConfig && splitDealerName) {
-        // Find the stats we already fetched for the split dealer
-        const splitResult = dealerResults.find((d) => d.config.name === splitDealerName);
-        if (splitResult && splitResult.stats) {
-          // We need to re-check individual contacts for yesterday — fetch from sub-account
-          const { searchContactsByTag, loadSubAccountConfigs } = require('../../lib/ghl-subaccounts');
-          try {
-            const GHL_BASE = 'https://services.leadconnectorhq.com';
-            const yestStart = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate());
-            const yestEnd   = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 23, 59, 59, 999);
+        try {
+          const GHL_BASE = 'https://services.leadconnectorhq.com';
+          const body = {
+            locationId: splitConfig.locationId,
+            page: 1,
+            pageLimit: 100,
+            filters: [
+              { field: 'tags', operator: 'contains', value: splitConfig.deliveredTag || 'qualified' },
+            ],
+          };
 
-            const body = {
-              locationId: splitConfig.locationId,
-              page: 1,
-              pageLimit: 100,
-              filters: [
-                { field: 'tags', operator: 'contains', value: splitConfig.deliveredTag || 'qualified' },
-              ],
-            };
+          const response = await fetch(`${GHL_BASE}/contacts/search`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${splitConfig.apiKey}`,
+              Version: '2021-07-28',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+          });
+          const data = await response.json();
+          const contacts = data.contacts || [];
 
-            const response = await fetch(`${GHL_BASE}/contacts/search`, {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${splitConfig.apiKey}`,
-                Version: '2021-07-28',
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify(body),
-            });
-            const data = await response.json();
-            const contacts = data.contacts || [];
+          const yestStart = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate());
+          const yestEnd   = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 23, 59, 59, 999);
 
-            for (const c of contacts) {
-              const created = new Date(c.dateCreated || c.dateAdded);
-              if (created >= yestStart && created <= yestEnd) {
-                // Check if paid
-                const fields = c.customFields || [];
-                for (const f of fields) {
-                  if (splitConfig.splitFieldId && f.id === splitConfig.splitFieldId) {
-                    if (f.value && f.value.toLowerCase().includes('paid')) {
-                      // Match this contact by phone or email to the Current Month Data
-                      if (c.phone) paidContactIds.add(c.phone.replace(/\D/g, '').slice(-10));
-                      if (c.email) paidContactIds.add(c.email.toLowerCase().trim());
-                    }
+          for (const c of contacts) {
+            const created = new Date(c.dateCreated || c.dateAdded);
+            if (created >= yestStart && created <= yestEnd) {
+              const fields = c.customFields || [];
+              for (const f of fields) {
+                if (splitConfig.splitFieldId && f.id === splitConfig.splitFieldId) {
+                  if (f.value && f.value.toLowerCase().includes('paid')) {
+                    if (c.phone) paidContactIds.add(c.phone.replace(/\D/g, '').slice(-10));
+                    if (c.email) paidContactIds.add(c.email.toLowerCase().trim());
                   }
                 }
               }
             }
-          } catch (err) {
-            console.warn('Failed to fetch Leduc paid contacts:', err.message);
           }
+        } catch (err) {
+          console.warn('Failed to fetch Leduc paid contacts:', err.message);
         }
       }
 
       // Group yesterday's leads by Sales Rep × Dealer
-      // repStats: { 'Jess': { 'Absolute Approval': count, 'Leduc (Paid)': count, ... } }
       const repStats = {};
       const repNames = ['Jess', 'Marsha', 'Jan', 'Rea'];
       for (const rn of repNames) repStats[rn] = {};
@@ -266,7 +267,8 @@ module.exports = async (req, res) => {
         const row = cmdRows[i];
         if (!row || !row[1]) continue;
         const qDate    = row[1]; // Qualified Date
-        const dealer   = row[2] || '';
+        const rawDealer = (row[2] || '').trim();
+        const fm       = (row[3] || '').trim();
         const salesRep = (row[4] || '').trim();
         const phone    = (row[9] || '').replace(/\D/g, '').slice(-10);
         const email    = (row[10] || '').toLowerCase().trim();
@@ -278,35 +280,46 @@ module.exports = async (req, res) => {
         const repKey = repNames.find((r) => salesRep.toLowerCase().includes(r.toLowerCase()));
         if (!repKey) continue;
 
-        // Determine dealer column
-        let dealerCol = dealer;
-        // Normalize to dealer names we know
-        const matchedDealer = dealerNames.find((dn) => dealer.toLowerCase().includes(dn.toLowerCase()) || dn.toLowerCase().includes(dealer.toLowerCase()));
-        if (matchedDealer) dealerCol = matchedDealer;
+        // Normalize dealer using Settings aliases
+        let dealerCol = aliasMap[rawDealer.toLowerCase()] || rawDealer;
+
+        // Also check FM name for REV attribution (Charbel, Ali Adnan → REV)
+        if (!dealerCol || !allDealers.includes(dealerCol)) {
+          // Check if FM maps to a known dealer
+          const fmLower = fm.toLowerCase();
+          if (fmLower.includes('charbel') || fmLower.includes('ali')) {
+            dealerCol = 'REV';
+          }
+          // Check raw dealer via alias
+          const aliased = aliasMap[rawDealer.toLowerCase()];
+          if (aliased && allDealers.includes(aliased)) {
+            dealerCol = aliased;
+          }
+        }
+
+        // Map sub-dealer names to parent dealers
+        // STK, ESK, CHC, CHF → Eastside Kia
+        const eskBranches = ['south trail kia', 'eastside kia', 'stk', 'esk', 'chc', 'chf', 'chd'];
+        if (eskBranches.includes(dealerCol.toLowerCase()) || eskBranches.includes(rawDealer.toLowerCase())) {
+          dealerCol = 'Eastside Kia';
+        }
 
         // For the split dealer (Leduc), check paid/free
         if (dealerCol === splitDealerName) {
           const isPaid = paidContactIds.has(phone) || paidContactIds.has(email);
           const key = isPaid ? `${splitDealerName} (Paid)` : `${splitDealerName} (Free)`;
           repStats[repKey][key] = (repStats[repKey][key] || 0) + 1;
-        } else {
+        } else if (allDealers.includes(dealerCol)) {
           repStats[repKey][dealerCol] = (repStats[repKey][dealerCol] || 0) + 1;
-        }
-      }
-
-      // Build column headers from all dealers that appear
-      const columns = [];
-      for (const dn of dealerNames) {
-        if (dn === splitDealerName) {
-          columns.push(`${dn} (Paid)`);
-          columns.push(`${dn} (Free)`);
         } else {
-          columns.push(dn);
+          // Unknown dealer — still count it under its name
+          repStats[repKey][dealerCol] = (repStats[repKey][dealerCol] || 0) + 1;
+          if (!columns.includes(dealerCol) && dealerCol) columns.push(dealerCol);
         }
       }
 
       // Check if any data exists
-      const hasData = repNames.some((rn) => Object.keys(repStats[rn]).length > 0);
+      const hasData = repNames.some((rn) => Object.values(repStats[rn]).reduce((s, v) => s + v, 0) > 0);
 
       if (hasData) {
         const thS = 'style="text-align: right; padding: 8px 12px; border-bottom: 2px solid #333; font-weight: bold; background: #f5f5f5;"';
@@ -318,7 +331,7 @@ module.exports = async (req, res) => {
 
         html = html.replace('</div>', `
           <p style="font-size: 16px; font-weight: bold; padding: 16px 0 8px 0; border-bottom: 2px solid #333;">═══ Qualified Yesterday (${yestDateStr}) ═══</p>
-          <table style="border-collapse: collapse; width: 100%; max-width: 650px; font-family: Arial, sans-serif; font-size: 14px;">
+          <table style="border-collapse: collapse; width: 100%; max-width: 700px; font-family: Arial, sans-serif; font-size: 14px;">
             <tr>
               <th ${thL}>Sales Rep</th>
               ${columns.map((c) => `<th ${thS}>${c}</th>`).join('')}
@@ -331,8 +344,8 @@ module.exports = async (req, res) => {
               const tr = isZero ? tdRGray : tdR;
               return `<tr>
                 <td ${tl}>${rn}</td>
-                ${columns.map((c) => `<td ${tr}>${repStats[rn][c] || (isZero ? '' : '')}</td>`).join('')}
-                <td style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; font-weight: bold; ${isZero ? 'color: #999;' : ''}">${total || (isZero ? '0' : '0')}</td>
+                ${columns.map((c) => `<td ${tr}>${repStats[rn][c] || ''}</td>`).join('')}
+                <td style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; font-weight: bold; ${isZero ? 'color: #999;' : ''}">${total}</td>
               </tr>`;
             }).join('')}
           </table>
