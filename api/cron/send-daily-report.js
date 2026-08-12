@@ -260,13 +260,19 @@ module.exports = async (req, res) => {
 
       // Group yesterday's leads by Sales Rep × Dealer
       const repStats = {};
-      const repNames = ['Jess', 'Marsha', 'Jan', 'Rea'];
-      for (const rn of repNames) repStats[rn] = {};
+      const knownReps = ['Jess', 'Marsha', 'Jan', 'Rea'];
+      for (const rn of knownReps) repStats[rn] = {};
+      const repNames = [...knownReps];
+
+      // FM names to exclude from Sales Rep (these are dealers/FMs, not ISA reps)
+      const fmExclusions = ['ali', 'charbel', 'kayam', 'ali adnan'];
+
+      let debugSkipped = [];
 
       for (let i = 1; i < cmdRows.length; i++) {
         const row = cmdRows[i];
         if (!row || !row[1]) continue;
-        const qDate    = row[1]; // Qualified Date
+        const qDate    = row[1];
         const rawDealer = (row[2] || '').trim();
         const fm       = (row[3] || '').trim();
         const salesRep = (row[4] || '').trim();
@@ -276,32 +282,43 @@ module.exports = async (req, res) => {
         if (qDate !== yestDateStr) continue;
         if (!salesRep) continue;
 
-        // Match rep name
-        const repKey = repNames.find((r) => salesRep.toLowerCase().includes(r.toLowerCase()));
-        if (!repKey) continue;
+        // Skip if "Sales Rep" is actually an FM/dealer name, not an ISA
+        if (fmExclusions.includes(salesRep.toLowerCase())) {
+          debugSkipped.push(`${salesRep} (FM, not ISA — dealer: ${rawDealer})`);
+          continue;
+        }
+
+        // Match rep name — try known reps first, otherwise add as new rep
+        let repKey = knownReps.find((r) => salesRep.toLowerCase().includes(r.toLowerCase()));
+        if (!repKey) {
+          repKey = salesRep;
+          if (!repStats[repKey]) {
+            repStats[repKey] = {};
+            repNames.push(repKey);
+          }
+        }
 
         // Normalize dealer using Settings aliases
         let dealerCol = aliasMap[rawDealer.toLowerCase()] || rawDealer;
 
-        // Also check FM name for REV attribution (Charbel, Ali Adnan → REV)
-        if (!dealerCol || !allDealers.includes(dealerCol)) {
-          // Check if FM maps to a known dealer
-          const fmLower = fm.toLowerCase();
-          if (fmLower.includes('charbel') || fmLower.includes('ali')) {
-            dealerCol = 'REV';
-          }
-          // Check raw dealer via alias
-          const aliased = aliasMap[rawDealer.toLowerCase()];
-          if (aliased && allDealers.includes(aliased)) {
-            dealerCol = aliased;
-          }
+        // Check dealer value AND FM for REV (Charbel, Ali Adnan, Ali → REV)
+        const dealerLower = dealerCol.toLowerCase();
+        const rawLower    = rawDealer.toLowerCase();
+        if (dealerLower.includes('charbel') || dealerLower.includes('ali adnan') || dealerLower === 'ali' ||
+            rawLower.includes('charbel') || rawLower.includes('ali adnan') || rawLower === 'ali') {
+          dealerCol = 'REV';
         }
 
         // Map sub-dealer names to parent dealers
-        // STK, ESK, CHC, CHF → Eastside Kia
+        // STK, ESK, CHC, CHF, South Trail Kia → Eastside Kia
         const eskBranches = ['south trail kia', 'eastside kia', 'stk', 'esk', 'chc', 'chf', 'chd'];
-        if (eskBranches.includes(dealerCol.toLowerCase()) || eskBranches.includes(rawDealer.toLowerCase())) {
+        if (eskBranches.includes(dealerCol.toLowerCase()) || eskBranches.includes(rawLower)) {
           dealerCol = 'Eastside Kia';
+        }
+
+        // Leduc aliases
+        if (dealerLower === 'lag' || rawLower === 'lag') {
+          dealerCol = 'Leduc';
         }
 
         // For the split dealer (Leduc), check paid/free
@@ -317,6 +334,12 @@ module.exports = async (req, res) => {
           if (!columns.includes(dealerCol) && dealerCol) columns.push(dealerCol);
         }
       }
+
+      // Log skipped reps for debugging
+      if (debugSkipped.length > 0) {
+        console.log(`  Skipped ${debugSkipped.length} leads with unknown reps: ${debugSkipped.join(', ')}`);
+      }
+      console.log(`  Rep stats: ${JSON.stringify(repStats)}`);
 
       // Check if any data exists
       const hasData = repNames.some((rn) => Object.values(repStats[rn]).reduce((s, v) => s + v, 0) > 0);
