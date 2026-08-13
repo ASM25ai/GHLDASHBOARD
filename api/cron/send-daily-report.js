@@ -99,11 +99,12 @@ module.exports = async (req, res) => {
       const hasSplit   = stats.allTime.split !== null;
 
       if (hasSplit) {
-        // ── Leduc-style: Order, Delivered, This Month, Paid ──────────
+        // ── Leduc-style: Order, Delivered, This Month, Paid, Refunds ──
         const order     = settings.orders[dealerName] || 0;
         const delivered = stats.allTime.total;
         const thisMonth = stats.thisMonth.total;
         const paid      = stats.allTime.split.paid;
+        const refunds   = stats.allTime.totalRefunds || 0;
 
         html += `
           <p ${sectionStyle}>═══ ${dealerName} ═══</p>
@@ -114,6 +115,7 @@ module.exports = async (req, res) => {
               <th ${thStyle}>Delivered</th>
               <th ${thStyle}>This Month</th>
               <th ${thStyle}>Paid</th>
+              <th ${thStyle}>Refunds</th>
             </tr>
             <tr>
               <td ${tdStyle}>${dealerName}</td>
@@ -121,6 +123,7 @@ module.exports = async (req, res) => {
               <td ${tdNumStyle}>${delivered}</td>
               <td ${tdNumStyle}>${thisMonth}</td>
               <td ${tdNumStyle}>${paid}</td>
+              <td ${tdNumStyle}>${refunds}</td>
             </tr>
           </table>
         `;

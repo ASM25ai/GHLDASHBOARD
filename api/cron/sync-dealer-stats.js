@@ -93,18 +93,20 @@ module.exports = async (req, res) => {
         const delivered = stats.allTime.total;
         const paid      = stats.allTime.split.paid;
         const free      = stats.allTime.split.free;
+        const refunds   = stats.allTime.totalRefunds || 0;
         const thisMonth = stats.thisMonth.total;
         const remain    = order > 0 ? order - paid : 0;
 
-        allTimeRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'This Month', 'Paid', 'Free', 'Remaining', '% Complete']);
+        allTimeRows.push([`═══ ${dealerName} ═══`, 'Order', 'Delivered', 'This Month', 'Paid', 'Free', 'Refunds', 'Remaining', '% Complete']);
         allTimeRows.push([
-          dealerName, order || '-', delivered, thisMonth, paid, free,
+          dealerName, order || '-', delivered, thisMonth, paid, free, refunds,
           order > 0 ? (remain < 0 ? remain : Math.max(0, remain)) : '-',
           order > 0 ? pct(paid, order) : '-',
         ]);
 
         atGrandOrder     += order;
         atGrandDelivered += delivered;
+        atGrandRefunds   += refunds;
 
       } else if (fmList.length > 0) {
         // ── FM breakdown dealer (e.g. Absolute Approval, Eastside Kia) ─
@@ -224,13 +226,14 @@ module.exports = async (req, res) => {
       monthlyRows.push([]);
 
       if (hasSplit) {
-        // Split dealer (Leduc) — show this month's paid/free
+        // Split dealer (Leduc) — show this month's paid/free/refunds
         const thisMonth = stats.thisMonth.total;
         const paid      = stats.thisMonth.split.paid;
         const free      = stats.thisMonth.split.free;
-        monthlyRows.push([`═══ ${dealerName} ═══`, 'This Month Delivered', 'Paid', 'Free']);
-        monthlyRows.push([dealerName, thisMonth, paid, free]);
-        monthlyRows.push([`TOTAL ${dealerName}`, thisMonth, paid, free]);
+        const refunds   = stats.thisMonth.totalRefunds || 0;
+        monthlyRows.push([`═══ ${dealerName} ═══`, 'This Month Delivered', 'Paid', 'Free', 'Refunds']);
+        monthlyRows.push([dealerName, thisMonth, paid, free, refunds]);
+        monthlyRows.push([`TOTAL ${dealerName}`, thisMonth, paid, free, refunds]);
       } else if (fmList.length > 0) {
         monthlyRows.push([`═══ ${dealerName} ═══`, 'This Month Delivered']);
         let dealerTotal = 0;
