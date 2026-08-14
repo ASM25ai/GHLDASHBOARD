@@ -72,6 +72,38 @@ module.exports = async (req, res) => {
       customFieldDefs = [{ error: err.message }];
     }
 
+    // Also search for contacts with "refund" tag
+    let refundContacts = [];
+    let refundTotal = 0;
+    try {
+      const refBody = {
+        locationId,
+        page: 1,
+        pageLimit: 5,
+        filters: [
+          { field: 'tags', operator: 'contains', value: 'refund' },
+        ],
+      };
+      const refRes = await fetch(`${GHL_BASE}/contacts/search`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Version: '2021-07-28',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(refBody),
+      });
+      const refData = await refRes.json();
+      refundTotal = refData.total || 0;
+      refundContacts = (refData.contacts || []).map((c) => ({
+        name: `${c.firstName || ''} ${c.lastName || ''}`.trim(),
+        tags: c.tags,
+        dateAdded: c.dateAdded,
+      }));
+    } catch (err) {
+      refundContacts = [{ error: err.message }];
+    }
+
     return res.status(200).json({
       dealer: config.name,
       locationId: config.locationId,
@@ -81,6 +113,7 @@ module.exports = async (req, res) => {
       totalContacts: data.total || contacts.length,
       sampleContacts: samples,
       uniqueTagsInSample: [...allTags].sort(),
+      refundTagSearch: { total: refundTotal, samples: refundContacts },
       customFieldDefinitions: customFieldDefs,
     });
 
