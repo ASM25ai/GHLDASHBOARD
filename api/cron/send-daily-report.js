@@ -188,11 +188,34 @@ module.exports = async (req, res) => {
       const yestDateStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
 
       // Read the Current Month Data tab
+      // On the 1st of the month, yesterday's data is in last month's tab
+      let cmdRows = [];
       const cmdRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
         range: 'Current Month Data!A1:L2000',
       });
-      const cmdRows = cmdRes.data.values || [];
+      cmdRows = cmdRes.data.values || [];
+
+      // Check if yesterday is in a different month (e.g. Sep 1 → Aug 31)
+      if (yesterday.getMonth() !== now_est.getMonth()) {
+        // Yesterday was in the previous month — read from that month's tab
+        const prevMonthLabel = yesterday.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+        const prevTabName = `Qualified Leads - ${prevMonthLabel}`;
+        console.log(`  Yesterday is in previous month — reading from "${prevTabName}"`);
+        try {
+          const prevRes = await sheets.spreadsheets.values.get({
+            spreadsheetId,
+            range: `'${prevTabName}'!A1:L2000`,
+          });
+          const prevRows = prevRes.data.values || [];
+          // Merge — prev month rows after current month rows
+          if (prevRows.length > 1) {
+            cmdRows = [...cmdRows, ...prevRows.slice(1)]; // skip header from prev
+          }
+        } catch (err) {
+          console.warn(`  Could not read prev month tab "${prevTabName}": ${err.message}`);
+        }
+      }
 
       // Use Settings aliasMap for dealer normalization
       const aliasMap = settings.aliasMap || {};
