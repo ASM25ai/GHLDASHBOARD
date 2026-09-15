@@ -57,7 +57,14 @@ module.exports = async (req, res) => {
     const dealerResults = [];
     for (const config of configs) {
       try {
-        const stats = await aggregateDealerStats(config);
+        // Build a per-FM order-date map for this dealer from the Settings sheet,
+        // so the aggregator can count "delivered since order date" per FM.
+        const fmDefsForConfig = settings.fms[config.name] || [];
+        const fmOrderDates = {};
+        for (const fmDef of fmDefsForConfig) {
+          if (fmDef.orderDate) fmOrderDates[fmDef.name] = fmDef.orderDate;
+        }
+        const stats = await aggregateDealerStats({ ...config, fmOrderDates });
         dealerResults.push({ config, stats });
       } catch (err) {
         console.error(`Failed to fetch ${config.name}:`, err.message);
@@ -129,48 +136,104 @@ module.exports = async (req, res) => {
         `;
 
       } else if (fmList.length > 0) {
-        // ── FM/Branch breakdown: Order, Delivered, Remaining, Refunds ─
-        html += `
-          <p ${sectionStyle}>═══ ${dealerName} ═══</p>
-          <table ${tableStyle}>
-            <tr>
-              <th ${thStyle}></th>
-              <th ${thStyle}>Order</th>
-              <th ${thStyle}>Delivered</th>
-              <th ${thStyle}>Remaining</th>
-              <th ${thStyle}>Refunds</th>
-            </tr>
-        `;
+        // Does this dealer use the current-order model? (any FM has an order date)
+        const usesCurrentOrder = fmList.some((fm) => fm.orderDate);
 
-        for (const fmDef of fmList) {
-          let delivered = 0;
-          let ref = 0;
-          for (const [ownerName, count] of Object.entries(stats.allTime.byFM)) {
-            if (matchFM(ownerName, [fmDef])) {
-              delivered += count;
-              ref += stats.allTime.refundsByFM[ownerName] || 0;
-            }
-          }
-          const afterRef = delivered - ref;
-          const remain   = fmDef.target > 0 ? fmDef.target - afterRef : 0;
-          const isFulfilled = remain <= 0;
-
-          const deliveredColor = isFulfilled ? 'color: #2196F3;' : '';
-          const remainColor    = isFulfilled ? 'color: #2196F3;' : 'color: #E53935;';
-          const remainDisplay  = remain < 0 ? remain : Math.max(0, remain);
-
+        if (usesCurrentOrder) {
+          // ── Current-order breakdown with carryover ──────────────────
+          // Columns: FM · New Quota · Prev Balance · Delivered · Refunds · Remaining
+          // Remaining = New Quota − Prev Balance − (Delivered − Refunds)
           html += `
-            <tr>
-              <td ${tdStyle}>${fmDef.name}</td>
-              <td ${tdNumStyle}>${fmDef.target || '-'}</td>
-              <td style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; font-weight: bold; ${deliveredColor}">${delivered}</td>
-              <td style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; font-weight: bold; ${remainColor}">${remainDisplay}</td>
-              <td ${tdNumStyle}>${ref}</td>
-            </tr>
+            <p ${sectionStyle}>═══ ${dealerName} ═══</p>
+            <table ${tableStyle}>
+              <tr>
+                <th ${thStyle}></th>
+                <th ${thStyle}>New Quota</th>
+                <th ${thStyle}>Prev Bal</th>
+                <th ${thStyle}>Delivered</th>
+                <th ${thStyle}>Refunds</th>
+                <th ${thStyle}>Remaining</th>
+              </tr>
           `;
-        }
 
-        html += `</table>`;
+          const soByFM  = (stats.sinceOrder && stats.sinceOrder.byFM) || {};
+          const soRefFM = (stats.sinceOrder && stats.sinceOrder.refundsByFM) || {};
+
+          for (const fmDef of fmList) {
+            let delivered = 0;
+            let ref = 0;
+            for (const [ownerName, count] of Object.entries(soByFM)) {
+              if (matchFM(ownerName, [fmDef])) {
+                delivered += count;
+                ref += soRefFM[ownerName] || 0;
+              }
+            }
+            const prevBal = fmDef.prevBalance || 0;
+            const netDelivered = delivered - ref;
+            const remain = fmDef.target - prevBal - netDelivered;
+            const isFulfilled = remain <= 0;
+
+            const deliveredColor = isFulfilled ? 'color: #2196F3;' : '';
+            const remainColor    = isFulfilled ? 'color: #2196F3;' : 'color: #E53935;';
+
+            html += `
+              <tr>
+                <td ${tdStyle}>${fmDef.name}</td>
+                <td ${tdNumStyle}>${fmDef.target || 0}</td>
+                <td ${tdNumStyle}>${prevBal}</td>
+                <td style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; font-weight: bold; ${deliveredColor}">${delivered}</td>
+                <td ${tdNumStyle}>${ref}</td>
+                <td style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; font-weight: bold; ${remainColor}">${remain}</td>
+              </tr>
+            `;
+          }
+
+          html += `</table>`;
+
+        } else {
+          // ── Legacy all-time breakdown (unchanged for other dealers) ──
+          html += `
+            <p ${sectionStyle}>═══ ${dealerName} ═══</p>
+            <table ${tableStyle}>
+              <tr>
+                <th ${thStyle}></th>
+                <th ${thStyle}>Order</th>
+                <th ${thStyle}>Delivered</th>
+                <th ${thStyle}>Remaining</th>
+                <th ${thStyle}>Refunds</th>
+              </tr>
+          `;
+
+          for (const fmDef of fmList) {
+            let delivered = 0;
+            let ref = 0;
+            for (const [ownerName, count] of Object.entries(stats.allTime.byFM)) {
+              if (matchFM(ownerName, [fmDef])) {
+                delivered += count;
+                ref += stats.allTime.refundsByFM[ownerName] || 0;
+              }
+            }
+            const afterRef = delivered - ref;
+            const remain   = fmDef.target > 0 ? fmDef.target - afterRef : 0;
+            const isFulfilled = remain <= 0;
+
+            const deliveredColor = isFulfilled ? 'color: #2196F3;' : '';
+            const remainColor    = isFulfilled ? 'color: #2196F3;' : 'color: #E53935;';
+            const remainDisplay  = remain < 0 ? remain : Math.max(0, remain);
+
+            html += `
+              <tr>
+                <td ${tdStyle}>${fmDef.name}</td>
+                <td ${tdNumStyle}>${fmDef.target || '-'}</td>
+                <td style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; font-weight: bold; ${deliveredColor}">${delivered}</td>
+                <td style="text-align: right; padding: 6px 12px; border-bottom: 1px solid #ddd; font-weight: bold; ${remainColor}">${remainDisplay}</td>
+                <td ${tdNumStyle}>${ref}</td>
+              </tr>
+            `;
+          }
+
+          html += `</table>`;
+        }
       }
     }
 
